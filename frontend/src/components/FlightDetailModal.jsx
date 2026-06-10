@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { Spinner } from "./Spinner";
-import { IconCheck, IconBot, IconStar, IconWarning } from "./icons";
+import { IconCheck, IconBot, IconStar, IconWarning, IconClose, IconEllipsisVertical } from "./icons";
 import { fmt, fmtPct, getLFColor } from "../utils/formatters";
 import { API_BASE_URL as API } from "../config";
 
@@ -326,8 +326,8 @@ export function FlightDetailModal({ flight, onClose, onSave }) {
               Flight details VJ | Select a row to run AI Simulation sandbox
             </div>
           </div>
-          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "var(--color-text-secondary)" }}>
-            <i className="ti ti-x" />
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 4, color: "var(--color-text-secondary)" }}>
+            <IconClose size={18} />
           </button>
         </div>
 
@@ -388,8 +388,8 @@ export function FlightDetailModal({ flight, onClose, onSave }) {
                             opacity: dragItem === idx ? 0.5 : 1,
                             transition: "all .15s",
                           }}>
-                          <div style={{ color: "var(--color-text-secondary)", fontSize: 16, cursor: "grab" }} onClick={e => e.stopPropagation()}>
-                            <i className="ti ti-dots-vertical" />
+                          <div style={{ color: "var(--color-text-secondary)", display: "flex", alignItems: "center", cursor: "grab" }} onClick={e => e.stopPropagation()}>
+                            <IconEllipsisVertical size={16} />
                           </div>
                           
                           <div style={{

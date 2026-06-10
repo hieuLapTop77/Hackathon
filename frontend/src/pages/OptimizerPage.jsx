@@ -1217,7 +1217,7 @@ export function OptimizerPage({ selectedFlight, onApplySuccess }) {
             boxShadow: "0 10px 30px rgba(0,0,0,0.15)"
           }}
         >
-          <i className="ti ti-plane" style={{ fontSize: 42, color: "var(--color-text-info)", transform: "rotate(45deg)", marginBottom: 4 }} />
+          <IconPlane size={42} style={{ color: "var(--color-text-info)", transform: "rotate(45deg)", marginBottom: 4 }} />
           <div style={{ fontSize: 14, fontWeight: 700, color: "var(--color-text-primary)" }}>Chưa chọn chuyến bay tối ưu</div>
           <p style={{ fontSize: 12, maxWidth: 400, margin: 0 }}>
             Vui lòng bấm chọn một chuyến bay từ danh sách tìm thấy ở trên (hoặc từ trang Danh sách chuyến bay) để xem và tối ưu giá chi tiết cho từng hạng vé.

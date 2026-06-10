@@ -19,7 +19,20 @@ export function CopilotPage() {
   const [loading, setLoading] = useState(false);
   const [statusData, setStatusData] = useState({ vllm_connected: false, vllm_model: "offline" });
   const [toast, setToast] = useState(null);
+  const [reasoningEnabled, setReasoningEnabled] = useState(true);
+  const [isFocused, setIsFocused] = useState(false);
   const messagesEndRef = useRef(null);
+
+  const getGreeting = () => {
+    const hours = new Date().getHours();
+    if (hours >= 5 && hours < 12) {
+      return "Hi, Good Morning";
+    } else if (hours >= 12 && hours < 18) {
+      return "Hi, Good Afternoon";
+    } else {
+      return "Hi, Good Evening";
+    }
+  };
 
   // Poll status endpoint to check vLLM connection status
   useEffect(() => {
@@ -337,405 +350,581 @@ export function CopilotPage() {
         display: "flex",
         flexDirection: "column",
         height: "100%",
-        overflow: "hidden"
+        overflow: "hidden",
+        position: "relative"
       }}>
-        {/* Top Header */}
-        <div style={{
-          padding: "16px 24px",
-          background: "rgba(255, 255, 255, 0.45)",
-          backdropFilter: "blur(12px)",
-          borderBottom: "1px solid var(--color-border-tertiary)",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          flexShrink: 0
-        }}>
-          <div>
-            <h1 style={{ fontSize: 18, fontWeight: 800, color: "var(--color-text-primary)", margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ display: "inline-flex", alignItems: "center" }}>
-                <svg style={{ width: 20, height: 20, color: "#e52d27" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
-                  <path d="m5 3 1 2.5L8.5 6 6 7 5 9.5 4 7 1.5 6 4 5 5 3Z"/>
-                  <path d="m19 17 1 2.5 2.5.5-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1 1-2.5Z"/>
-                </svg>
-              </span>
-              AI Revenue Copilot
-            </h1>
-            <p style={{ fontSize: 12, color: "var(--color-text-secondary)", margin: "4px 0 0 0" }}>
-              Trợ lý đàm thoại thông minh hỗ trợ phân tích định giá thời gian thực
-            </p>
-          </div>
-
-          {/* Status Indicator */}
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        {messages.length <= 1 && !loading ? (
+          /* --- GEMINI-STYLE CENTERED LANDING UI --- */
+          <div style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "40px 20px",
+            background: "radial-gradient(circle at 50% 50%, rgba(229, 75, 75, 0.06) 0%, rgba(255, 255, 255, 0) 70%)",
+            position: "relative"
+          }}>
+            {/* Model & Connection Badge Floating Top-Right */}
             <div style={{
+              position: "absolute",
+              top: 20,
+              right: 24,
               display: "flex",
               alignItems: "center",
-              gap: 6,
-              background: statusData.vllm_connected ? "rgba(16, 185, 129, 0.1)" : "rgba(239, 68, 68, 0.1)",
-              border: `1px solid ${statusData.vllm_connected ? "rgba(16, 185, 129, 0.2)" : "rgba(239, 68, 68, 0.2)"}`,
-              padding: "6px 12px",
-              borderRadius: 20,
-              fontSize: 12,
-              fontWeight: 700,
-              color: statusData.vllm_connected ? "var(--color-text-success)" : "var(--color-text-danger)"
+              gap: 8
             }}>
-              <span style={{
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                backgroundColor: statusData.vllm_connected ? "#10b981" : "#ef4444",
-                display: "inline-block",
-                boxShadow: statusData.vllm_connected ? "0 0 8px #10b981" : "none"
-              }} />
-              <span>vLLM: {statusData.vllm_connected ? "Connected" : "Offline"}</span>
-            </div>
-
-            <div style={{
-              fontSize: 11,
-              color: "var(--color-text-secondary)",
-              background: "var(--color-background-tertiary)",
-              padding: "6px 12px",
-              borderRadius: 20,
-              border: "1px solid var(--color-border-tertiary)",
-              fontWeight: 600
-            }}>
-              Model: <span style={{ fontFamily: "monospace", color: "var(--color-text-primary)" }}>{statusData.vllm_model.split("/").pop()}</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Main Message History Area */}
-        <div style={{
-          flex: 1,
-          overflowY: "auto",
-          padding: "24px",
-          display: "flex",
-          flexDirection: "column",
-          gap: 20
-        }}>
-          {messages.map((m, idx) => (
-            <div key={idx} style={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: m.role === "user" ? "flex-end" : "flex-start",
-              maxWidth: "85%",
-              alignSelf: m.role === "user" ? "flex-end" : "flex-start"
-            }}>
-              {/* Sender Label */}
-              <span style={{
-                fontSize: 11,
-                fontWeight: 700,
-                color: "var(--color-text-secondary)",
-                marginBottom: 4,
-                padding: "0 4px"
-              }}>
-                {m.role === "user" ? "MEMBER / REVENUE OPERATOR" : "VJ REVENUE COPILOT"}
-              </span>
-
-              {/* Message Card */}
-              <div 
-                className={m.role === "user" ? "" : "glass-panel"}
-                style={{
-                  background: m.role === "user" ? "linear-gradient(135deg, #e52d27, #b31217)" : "var(--color-background-primary)",
-                  color: m.role === "user" ? "#ffffff" : "var(--color-text-primary)",
-                  padding: "16px 20px",
-                  borderRadius: 16,
-                  boxShadow: m.role === "user" ? "0 4px 12px rgba(229,45,39,0.15)" : "0 4px 12px rgba(0,0,0,0.02)",
-                  border: m.role === "user" ? "none" : "1px solid rgba(255,255,255,0.6)",
-                  lineHeight: "1.6",
-                  fontSize: 14,
-                  wordBreak: "break-word"
-                }}
-              >
-                {/* Thinking Details (CoT) */}
-                {m.thinking && (
-                  <details style={{
-                    marginBottom: 14,
-                    padding: "10px 14px",
-                    background: m.role === "user" ? "rgba(255,255,255,0.15)" : "var(--color-background-tertiary)",
-                    borderRadius: 10,
-                    fontSize: 12,
-                    border: m.role === "user" ? "none" : "1px solid var(--color-border-tertiary)",
-                    color: m.role === "user" ? "rgba(255,255,255,0.9)" : "var(--color-text-secondary)"
-                  }}>
-                    <summary style={{
-                      fontWeight: 800,
-                      cursor: "pointer",
-                      outline: "none",
-                      userSelect: "none",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 6
-                    }}>
-                      <svg style={{ width: 14, height: 14, color: "var(--color-text-secondary)" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A5 5 0 0 0 8 8c0 1 .3 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/>
-                        <path d="M9 18h6"/>
-                        <path d="M10 22h4"/>
-                      </svg>
-                      Chuỗi suy luận logic (Chain of Thought)
-                    </summary>
-                    <div style={{
-                      marginTop: 8,
-                      whiteSpace: "pre-wrap",
-                      fontFamily: "var(--font-sans)",
-                      opacity: 0.95,
-                      maxHeight: 200,
-                      overflowY: "auto",
-                      paddingRight: 6
-                    }}>
-                      {m.thinking}
-                    </div>
-                  </details>
-                )}
-
-                {/* Markdown text parser */}
-                <div style={{ whiteSpace: "pre-wrap" }}>
-                  {m.text.split("\n").map((line, lIdx) => {
-                    let renderedLine = line;
-                    const isBullet = line.startsWith("* ") || line.startsWith("- ");
-                    const isNumbered = /^\d+\.\s/.test(line);
-                    
-                    const parts = renderedLine.split("**");
-                    const contentElements = parts.map((part, pIdx) => {
-                      if (pIdx % 2 === 1) {
-                        return <strong key={pIdx} style={{ fontWeight: 800, color: m.role === "user" ? "#ffffff" : "#e52d27" }}>{part}</strong>;
-                      }
-                      return part;
-                    });
-
-                    if (isBullet) {
-                      return <div key={lIdx} style={{ marginLeft: 16, marginBottom: 4, display: "list-item", listStyleType: "disc" }}>{contentElements}</div>;
-                    }
-                    if (isNumbered) {
-                      return <div key={lIdx} style={{ marginLeft: 16, marginBottom: 4, display: "list-item", listStyleType: "decimal" }}>{contentElements}</div>;
-                    }
-                    return <div key={lIdx} style={{ marginBottom: 6 }}>{contentElements}</div>;
-                  })}
-                </div>
-
-                {/* Tools Info */}
-                {m.tools && m.tools.length > 0 && (
-                  <div style={{
-                    marginTop: 16,
-                    paddingTop: 14,
-                    borderTop: `1px solid ${m.role === "user" ? "rgba(255,255,255,0.2)" : "var(--color-border-tertiary)"}`,
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 8
-                  }}>
-                    <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.5px", color: m.role === "user" ? "#ffffff" : "var(--color-text-secondary)", display: "flex", alignItems: "center", gap: 6 }}>
-                      <svg style={{ width: 12, height: 12, color: m.role === "user" ? "#ffffff" : "var(--color-text-secondary)" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-                      </svg>
-                      CÁC CÔNG CỤ ĐÃ SỬ DỤNG:
-                    </span>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      {m.tools.map((tool, tIdx) => (
-                        <div key={tIdx} style={{
-                          fontSize: 12,
-                          background: m.role === "user" ? "rgba(0,0,0,0.15)" : "var(--color-background-tertiary)",
-                          padding: "8px 12px",
-                          borderRadius: 8,
-                          border: m.role === "user" ? "none" : "1.5px solid var(--color-border-tertiary)"
-                        }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, color: m.role === "user" ? "#fff" : "#e52d27" }}>
-                            <svg style={{ width: 12, height: 12, fill: "currentColor" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-                            </svg>
-                            {tool.name}
-                          </div>
-                          <div style={{ fontSize: 11, color: m.role === "user" ? "rgba(255,255,255,0.7)" : "var(--color-text-secondary)", marginTop: 2 }}>
-                            {tool.result}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Apply Price Card */}
-                {m.action && m.action.type === "apply_price" && m.action.recommended_price !== undefined && (
-                  <div style={{
-                    marginTop: 18,
-                    padding: "16px",
-                    background: m.role === "user" ? "rgba(255, 255, 255, 0.15)" : "var(--color-background-info)",
-                    border: m.role === "user" ? "1px solid rgba(255,255,255,0.3)" : "1px solid var(--color-border-info)",
-                    borderRadius: 12,
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    gap: 16
-                  }}>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                      <span style={{ fontSize: 10, fontWeight: 800, opacity: 0.8 }}>HÀNH ĐỘNG KHUYẾN NGHỊ</span>
-                      <span style={{ fontSize: 14, fontWeight: 800 }}>Chuyến {m.action.flight_no}: {m.action.recommended_price.toLocaleString()} VND</span>
-                      <span style={{ fontSize: 11, opacity: 0.9 }}>Load Factor dự kiến: {(m.action.recommended_lf * 100).toFixed(1)}%</span>
-                    </div>
-
-                    <button
-                      onClick={() => handleApplyPrice(m.action, idx)}
-                      disabled={m.action.applied}
-                      style={{
-                        background: m.action.applied ? "var(--color-background-success)" : "linear-gradient(135deg, #e52d27, #b31217)",
-                        color: "#ffffff",
-                        border: "none",
-                        padding: "8px 16px",
-                        borderRadius: 8,
-                        fontSize: 12,
-                        fontWeight: 700,
-                        cursor: m.action.applied ? "default" : "pointer",
-                        boxShadow: "0 4px 10px rgba(0,0,0,0.15)",
-                        transition: "transform 0.2s, box-shadow 0.2s"
-                      }}
-                      onMouseOver={e => !m.action.applied && (e.currentTarget.style.transform = "scale(1.05)")}
-                      onMouseOut={e => !m.action.applied && (e.currentTarget.style.transform = "scale(1)")}
-                    >
-                      {m.action.applied ? (
-                        <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                          <svg style={{ width: 12, height: 12 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                            <polyline points="20 6 9 17 4 12" />
-                          </svg>
-                          Đã áp dụng
-                        </span>
-                      ) : "Áp dụng giá vé"}
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-
-          {loading && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: "60%" }}>
-              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--color-text-secondary)", padding: "0 4px" }}>
-                VJ REVENUE COPILOT ĐANG SUY NGHĨ...
-              </span>
               <div style={{
-                background: "var(--color-background-secondary)",
-                padding: "16px 20px",
-                borderRadius: 16,
-                border: "1px solid var(--color-border-tertiary)",
                 display: "flex",
                 alignItems: "center",
-                gap: 8,
-                color: "var(--color-text-secondary)",
-                fontSize: 13,
-                fontStyle: "italic"
+                gap: 6,
+                background: statusData.vllm_connected ? "var(--color-background-success)" : "var(--color-background-danger)",
+                border: `1px solid ${statusData.vllm_connected ? "var(--color-border-success)" : "var(--color-border-danger)"}`,
+                padding: "4px 10px",
+                borderRadius: 20,
+                fontSize: 10,
+                fontWeight: 700,
+                color: statusData.vllm_connected ? "var(--color-text-success)" : "var(--color-text-danger)"
               }}>
-                <span className="copilot-spinner" style={{
-                  width: 14,
-                  height: 14,
-                  border: "2px solid var(--color-border-tertiary)",
-                  borderTop: "2px solid #e52d27",
+                <span style={{
+                  width: 5,
+                  height: 5,
                   borderRadius: "50%",
-                  display: "inline-block",
-                  animation: "spin 1s linear infinite"
+                  backgroundColor: statusData.vllm_connected ? "#059669" : "#be123c",
+                  display: "inline-block"
                 }} />
-                <span>Chờ vLLM phân chia Tensor & Nemotron suy luận...</span>
+                <span>vLLM: {statusData.vllm_connected ? "Connected" : "Offline"}</span>
               </div>
             </div>
-          )}
-          <div ref={messagesEndRef} />
-        </div>
 
-        {/* Suggestions */}
-        {messages.length === 1 && !loading && (
-          <div style={{
-            padding: "0 24px 12px 24px",
-            display: "flex",
-            gap: 10,
-            flexWrap: "wrap",
-            flexShrink: 0
-          }}>
-            {suggestions.map((s, idx) => (
-              <button
-                key={idx}
-                onClick={() => handleSend(s)}
-                className="glass-button"
-                style={{
-                  borderRadius: 20,
-                  padding: "8px 16px",
-                  fontSize: 12,
-                  cursor: "pointer",
-                  fontWeight: 600,
-                  transition: "all 0.2s",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6
-                }}
-              >
-                <svg style={{ width: 12, height: 12, color: "var(--color-text-secondary)" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A5 5 0 0 0 8 8c0 1 .3 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/>
-                  <path d="M9 18h6"/>
-                </svg>
-                {s}
-              </button>
-            ))}
-          </div>
-        )}
+            {/* Centered Greeting */}
+            <h1 style={{
+              fontSize: 34,
+              fontWeight: 300,
+              color: "#1f1f1f",
+              textAlign: "center",
+              marginBottom: 36,
+              fontFamily: "var(--font-sans)",
+              letterSpacing: "-0.5px"
+            }}>
+              {getGreeting()}, <span style={{ fontWeight: 400, color: "var(--color-text-info)" }}>How can I help you today?</span>
+            </h1>
 
-        {/* Input Bar */}
-        <div style={{
-          padding: "16px 24px 24px 24px",
-          background: "rgba(255, 255, 255, 0.45)",
-          backdropFilter: "blur(12px)",
-          borderTop: "1px solid var(--color-border-tertiary)",
-          display: "flex",
-          gap: 12,
-          alignItems: "center",
-          flexShrink: 0
-        }}>
-          <input
-            type="text"
-            value={inputValue}
-            onChange={e => setInputValue(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && handleSend()}
-            placeholder="Hỏi Copilot tối ưu chuyến bay hoặc chặng bay..."
-            disabled={loading}
-            className="glass-input"
-            style={{
-              flex: 1,
-              height: 48,
-              padding: "0 20px",
-              borderRadius: 24,
-              fontSize: 14,
-              outline: "none",
-            }}
-            onFocus={e => {
-              e.currentTarget.style.borderColor = "var(--color-text-info)";
-              e.currentTarget.style.boxShadow = "0 0 0 3px rgba(222, 31, 38, 0.15)";
-            }}
-            onBlur={e => {
-              e.currentTarget.style.borderColor = "rgba(0, 0, 0, 0.08)";
-              e.currentTarget.style.boxShadow = "none";
-            }}
-          />
-          <button
-            onClick={() => handleSend()}
-            disabled={loading || !inputValue.trim()}
-            style={{
-              height: 48,
-              padding: "0 24px",
-              borderRadius: 24,
-              background: loading || !inputValue.trim() ? "rgba(0, 0, 0, 0.04)" : "linear-gradient(135deg, #e52d27, #b31217)",
-              color: loading || !inputValue.trim() ? "var(--color-text-secondary)" : "#ffffff",
-              border: "none",
-              fontSize: 14,
-              fontWeight: 700,
-              cursor: loading || !inputValue.trim() ? "default" : "pointer",
+            {/* Centered Input Box Pill */}
+            <div style={{
+              width: "100%",
+              maxWidth: 720,
+              height: 56,
               display: "flex",
               alignItems: "center",
-              gap: 6,
-              boxShadow: loading || !inputValue.trim() ? "none" : "0 4px 12px rgba(229,45,39,0.2)"
-            }}
-          >
-            <span>Gửi yêu cầu</span>
-            <svg style={{ width: 16, height: 16 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3.5c-.5-.5-2.5 0-4 1.5L13.5 8.5 5.3 6.7c-.9-.2-1.9.1-2.4.9l-1.1 1.9c-.4.7-.2 1.7.5 2.2l6 4-2.2 2.2H3l-2 2 .7.7L3 21l3-1 2-2v-3.1l2.2-2.2 4 6c.5.7 1.5.9 2.2.5l1.9-1.1c.8-.5 1.1-1.5.9-2.4z"/>
-            </svg>
-          </button>
-        </div>
+              background: "#ffffff",
+              border: isFocused ? "1.5px solid rgba(229, 75, 75, 0.25)" : "1.5px solid rgba(0, 0, 0, 0.05)",
+              padding: "0 12px 0 24px",
+              borderRadius: 28,
+              boxShadow: isFocused 
+                ? "0 12px 40px rgba(229, 75, 75, 0.08), 0 0 0 3px rgba(229, 75, 75, 0.06)" 
+                : "0 12px 40px rgba(229, 75, 75, 0.04), 0 2px 10px rgba(0, 0, 0, 0.02)",
+              transition: "all 0.3s cubic-bezier(0.16, 1, 0.3, 1)"
+            }}>
+              {/* Text Input */}
+              <input
+                type="text"
+                value={inputValue}
+                onChange={e => setInputValue(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && handleSend()}
+                placeholder="Hỏi Copilot..."
+                disabled={loading}
+                onFocus={() => setIsFocused(true)}
+                onBlur={() => setIsFocused(false)}
+                style={{
+                  flex: 1,
+                  border: "none",
+                  outline: "none",
+                  background: "transparent",
+                  fontSize: 16,
+                  color: "#1f1f1f",
+                  height: "100%",
+                  fontFamily: "var(--font-sans)"
+                }}
+              />
+
+              {/* Chat / Send Button */}
+              <button
+                onClick={() => {
+                  if (inputValue.trim()) {
+                    handleSend();
+                  }
+                }}
+                disabled={loading}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  cursor: inputValue.trim() ? "pointer" : "default",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 36,
+                  height: 36,
+                  color: inputValue.trim() ? "var(--color-text-info)" : "#b0b3b8",
+                  borderRadius: "50%",
+                  transition: "all 0.2s"
+                }}
+                onMouseOver={e => {
+                  if (inputValue.trim()) e.currentTarget.style.backgroundColor = "rgba(0, 0, 0, 0.04)";
+                }}
+                onMouseOut={e => {
+                  if (inputValue.trim()) e.currentTarget.style.backgroundColor = "transparent";
+                }}
+              >
+                {inputValue.trim() ? (
+                  <svg style={{ width: 20, height: 20 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="22" y1="2" x2="11" y2="13" />
+                    <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                  </svg>
+                ) : (
+                  <svg style={{ width: 20, height: 20 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                  </svg>
+                )}
+              </button>
+            </div>
+
+            {/* Suggestions under Centered Input */}
+            <div style={{
+              display: "flex",
+              gap: 8,
+              justifyContent: "center",
+              flexWrap: "wrap",
+              maxWidth: 720,
+              marginTop: 20
+            }}>
+              {suggestions.map((s, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => handleSend(s)}
+                  className="glass-button"
+                  style={{
+                    borderRadius: 20,
+                    padding: "8px 16px",
+                    fontSize: 12,
+                    cursor: "pointer",
+                    fontWeight: 600,
+                    transition: "all 0.2s",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    border: "1px solid rgba(0, 0, 0, 0.04)"
+                  }}
+                  onMouseOver={e => {
+                    e.currentTarget.style.borderColor = "rgba(229, 75, 75, 0.15)";
+                    e.currentTarget.style.background = "#fff";
+                  }}
+                  onMouseOut={e => {
+                    e.currentTarget.style.borderColor = "rgba(0, 0, 0, 0.04)";
+                    e.currentTarget.style.background = "rgba(255, 255, 255, 0.85)";
+                  }}
+                >
+                  <svg style={{ width: 12, height: 12, color: "var(--color-text-info)" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A5 5 0 0 0 8 8c0 1 .3 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/>
+                    <path d="M9 18h6"/>
+                  </svg>
+                  <span>{s}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          /* --- CONVERSATION / ACTIVE CHAT UI --- */
+          <>
+            {/* Top Header */}
+            <div style={{
+              padding: "16px 24px",
+              background: "rgba(255, 255, 255, 0.45)",
+              backdropFilter: "blur(12px)",
+              borderBottom: "1px solid var(--color-border-tertiary)",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              flexShrink: 0
+            }}>
+              <div>
+                <h1 style={{ fontSize: 18, fontWeight: 800, color: "var(--color-text-primary)", margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ display: "inline-flex", alignItems: "center" }}>
+                    <svg style={{ width: 20, height: 20, color: "var(--color-text-info)" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+                      <path d="m5 3 1 2.5L8.5 6 6 7 5 9.5 4 7 1.5 6 4 5 5 3Z"/>
+                      <path d="m19 17 1 2.5 2.5.5-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1 1-2.5Z"/>
+                    </svg>
+                  </span>
+                  AI Revenue Copilot
+                </h1>
+                <p style={{ fontSize: 12, color: "var(--color-text-secondary)", margin: "4px 0 0 0" }}>
+                  Trợ lý đàm thoại thông minh hỗ trợ phân tích định giá thời gian thực
+                </p>
+              </div>
+
+              {/* Status Indicator */}
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  background: statusData.vllm_connected ? "var(--color-background-success)" : "var(--color-background-danger)",
+                  border: `1px solid ${statusData.vllm_connected ? "var(--color-border-success)" : "var(--color-border-danger)"}`,
+                  padding: "6px 12px",
+                  borderRadius: 20,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  color: statusData.vllm_connected ? "var(--color-text-success)" : "var(--color-text-danger)"
+                }}>
+                  <span style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    backgroundColor: statusData.vllm_connected ? "#059669" : "#be123c",
+                    display: "inline-block"
+                  }} />
+                  <span>vLLM: {statusData.vllm_connected ? "Connected" : "Offline"}</span>
+                </div>
+
+                <div style={{
+                  fontSize: 11,
+                  color: "var(--color-text-secondary)",
+                  background: "var(--color-background-tertiary)",
+                  padding: "6px 12px",
+                  borderRadius: 20,
+                  border: "1px solid var(--color-border-tertiary)",
+                  fontWeight: 600
+                }}>
+                  Model: <span style={{ fontFamily: "monospace", color: "var(--color-text-primary)" }}>{statusData.vllm_model.split("/").pop()}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Main Message History Area */}
+            <div style={{
+              flex: 1,
+              overflowY: "auto",
+              padding: "24px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 20
+            }}>
+              {messages.map((m, idx) => (
+                <div key={idx} style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: m.role === "user" ? "flex-end" : "flex-start",
+                  maxWidth: "85%",
+                  alignSelf: m.role === "user" ? "flex-end" : "flex-start"
+                }}>
+                  {/* Sender Label */}
+                  <span style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    color: "var(--color-text-secondary)",
+                    marginBottom: 4,
+                    padding: "0 4px"
+                  }}>
+                    {m.role === "user" ? "MEMBER / REVENUE OPERATOR" : "VJ REVENUE COPILOT"}
+                  </span>
+
+                  {/* Message Card */}
+                  <div 
+                    className={m.role === "user" ? "" : "glass-panel"}
+                    style={{
+                      background: m.role === "user" ? "linear-gradient(135deg, #e54b4b, #c53030)" : "var(--color-background-primary)",
+                      color: m.role === "user" ? "#ffffff" : "var(--color-text-primary)",
+                      padding: "16px 20px",
+                      borderRadius: 16,
+                      boxShadow: m.role === "user" ? "0 4px 12px rgba(229,75,75,0.12)" : "0 4px 12px rgba(0,0,0,0.02)",
+                      border: m.role === "user" ? "none" : "1px solid rgba(255,255,255,0.6)",
+                      lineHeight: "1.6",
+                      fontSize: 14,
+                      wordBreak: "break-word"
+                    }}
+                  >
+                    {/* Thinking Details (CoT) */}
+                    {reasoningEnabled && m.thinking && (
+                      <details style={{
+                        marginBottom: 14,
+                        padding: "10px 14px",
+                        background: m.role === "user" ? "rgba(255,255,255,0.15)" : "var(--color-background-tertiary)",
+                        borderRadius: 10,
+                        fontSize: 12,
+                        border: m.role === "user" ? "none" : "1px solid var(--color-border-tertiary)",
+                        color: m.role === "user" ? "rgba(255,255,255,0.9)" : "var(--color-text-secondary)"
+                      }}>
+                        <summary style={{
+                          fontWeight: 800,
+                          cursor: "pointer",
+                          outline: "none",
+                          userSelect: "none",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6
+                        }}>
+                          <svg style={{ width: 14, height: 14, color: "var(--color-text-secondary)" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A5 5 0 0 0 8 8c0 1 .3 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/>
+                            <path d="M9 18h6"/>
+                            <path d="M10 22h4"/>
+                          </svg>
+                          Chuỗi suy luận logic (Chain of Thought)
+                        </summary>
+                        <div style={{
+                          marginTop: 8,
+                          whiteSpace: "pre-wrap",
+                          fontFamily: "var(--font-sans)",
+                          opacity: 0.95,
+                          maxHeight: 200,
+                          overflowY: "auto",
+                          paddingRight: 6
+                        }}>
+                          {m.thinking}
+                        </div>
+                      </details>
+                    )}
+
+                    {/* Markdown text parser */}
+                    <div style={{ whiteSpace: "pre-wrap" }}>
+                      {m.text.split("\n").map((line, lIdx) => {
+                        let renderedLine = line;
+                        const isBullet = line.startsWith("* ") || line.startsWith("- ");
+                        const isNumbered = /^\d+\.\s/.test(line);
+                        
+                        const parts = renderedLine.split("**");
+                        const contentElements = parts.map((part, pIdx) => {
+                          if (pIdx % 2 === 1) {
+                            return <strong key={pIdx} style={{ fontWeight: 800, color: m.role === "user" ? "#ffffff" : "var(--color-text-info)" }}>{part}</strong>;
+                          }
+                          return part;
+                        });
+
+                        if (isBullet) {
+                          return <div key={lIdx} style={{ marginLeft: 16, marginBottom: 4, display: "list-item", listStyleType: "disc" }}>{contentElements}</div>;
+                        }
+                        if (isNumbered) {
+                          return <div key={lIdx} style={{ marginLeft: 16, marginBottom: 4, display: "list-item", listStyleType: "decimal" }}>{contentElements}</div>;
+                        }
+                        return <div key={lIdx} style={{ marginBottom: 6 }}>{contentElements}</div>;
+                      })}
+                    </div>
+
+                    {/* Tools Info */}
+                    {m.tools && m.tools.length > 0 && (
+                      <div style={{
+                        marginTop: 16,
+                        paddingTop: 14,
+                        borderTop: `1px solid ${m.role === "user" ? "rgba(255,255,255,0.2)" : "var(--color-border-tertiary)"}`,
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 8
+                      }}>
+                        <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.5px", color: m.role === "user" ? "#ffffff" : "var(--color-text-secondary)", display: "flex", alignItems: "center", gap: 6 }}>
+                          <svg style={{ width: 12, height: 12, color: m.role === "user" ? "#ffffff" : "var(--color-text-secondary)" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                          </svg>
+                          CÁC CÔNG CỤ ĐÃ SỬ DỤNG:
+                        </span>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          {m.tools.map((tool, tIdx) => (
+                            <div key={tIdx} style={{
+                              fontSize: 12,
+                              background: m.role === "user" ? "rgba(0,0,0,0.15)" : "var(--color-background-tertiary)",
+                              padding: "8px 12px",
+                              borderRadius: 8,
+                              border: m.role === "user" ? "none" : "1.5px solid var(--color-border-tertiary)"
+                            }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, color: m.role === "user" ? "#fff" : "var(--color-text-info)" }}>
+                                <svg style={{ width: 12, height: 12, fill: "currentColor" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                                </svg>
+                                {tool.name}
+                              </div>
+                              <div style={{ fontSize: 11, color: m.role === "user" ? "rgba(255,255,255,0.7)" : "var(--color-text-secondary)", marginTop: 2 }}>
+                                {tool.result}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Apply Price Card */}
+                    {m.action && m.action.type === "apply_price" && m.action.recommended_price !== undefined && (
+                      <div style={{
+                        marginTop: 18,
+                        padding: "16px",
+                        background: m.role === "user" ? "rgba(255, 255, 255, 0.15)" : "var(--color-background-info)",
+                        border: m.role === "user" ? "1px solid rgba(255,255,255,0.3)" : "1px solid var(--color-border-info)",
+                        borderRadius: 12,
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: 16
+                      }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                          <span style={{ fontSize: 10, fontWeight: 800, opacity: 0.8 }}>HÀNH ĐỘNG KHUYẾN NGHỊ</span>
+                          <span style={{ fontSize: 14, fontWeight: 800 }}>Chuyến {m.action.flight_no}: {m.action.recommended_price.toLocaleString()} VND</span>
+                          <span style={{ fontSize: 11, opacity: 0.9 }}>Load Factor dự kiến: {(m.action.recommended_lf * 100).toFixed(1)}%</span>
+                        </div>
+
+                        <button
+                          onClick={() => handleApplyPrice(m.action, idx)}
+                          disabled={m.action.applied}
+                          style={{
+                            background: m.action.applied ? "var(--color-background-success)" : "linear-gradient(135deg, #e54b4b, #c53030)",
+                            color: "#ffffff",
+                            border: "none",
+                            padding: "8px 16px",
+                            borderRadius: 8,
+                            fontSize: 12,
+                            fontWeight: 700,
+                            cursor: m.action.applied ? "default" : "pointer",
+                            boxShadow: "0 4px 10px rgba(0,0,0,0.15)",
+                            transition: "transform 0.2s, box-shadow 0.2s"
+                          }}
+                          onMouseOver={e => !m.action.applied && (e.currentTarget.style.transform = "scale(1.05)")}
+                          onMouseOut={e => !m.action.applied && (e.currentTarget.style.transform = "scale(1)")}
+                        >
+                          {m.action.applied ? (
+                            <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                              <svg style={{ width: 12, height: 12 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                              Đã áp dụng
+                            </span>
+                          ) : "Áp dụng giá vé"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+
+              {loading && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: "60%" }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "var(--color-text-secondary)", padding: "0 4px" }}>
+                    VJ REVENUE COPILOT ĐANG SUY NGHĨ...
+                  </span>
+                  <div style={{
+                    background: "var(--color-background-secondary)",
+                    padding: "16px 20px",
+                    borderRadius: 16,
+                    border: "1px solid var(--color-border-tertiary)",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    color: "var(--color-text-secondary)",
+                    fontSize: 13,
+                    fontStyle: "italic"
+                  }}>
+                    <span className="copilot-spinner" style={{
+                      width: 14,
+                      height: 14,
+                      border: "2px solid var(--color-border-tertiary)",
+                      borderTop: "2px solid var(--color-text-info)",
+                      borderRadius: "50%",
+                      display: "inline-block",
+                      animation: "spin 1s linear infinite"
+                    }} />
+                    <span>Chờ vLLM phân chia Tensor & Nemotron suy luận...</span>
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* Input Bar */}
+            <div style={{
+              padding: "16px 24px 24px 24px",
+              background: "transparent",
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "center",
+              flexShrink: 0
+            }}>
+              {/* White Input Box Pill */}
+              <div style={{
+                width: "100%",
+                maxWidth: 720,
+                height: 52,
+                display: "flex",
+                alignItems: "center",
+                background: "#ffffff",
+                border: isFocused ? "1.5px solid rgba(229, 75, 75, 0.25)" : "1.5px solid rgba(0, 0, 0, 0.05)",
+                padding: "0 12px 0 20px",
+                borderRadius: 26,
+                boxShadow: isFocused 
+                  ? "0 12px 40px rgba(229, 75, 75, 0.08), 0 0 0 3px rgba(229, 75, 75, 0.06)" 
+                  : "0 8px 30px rgba(0, 0, 0, 0.02), 0 2px 8px rgba(0, 0, 0, 0.01)",
+                transition: "all 0.3s cubic-bezier(0.16, 1, 0.3, 1)"
+              }}>
+                {/* Text Input */}
+                <input
+                  type="text"
+                  value={inputValue}
+                  onChange={e => setInputValue(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && handleSend()}
+                  placeholder="Hỏi Copilot..."
+                  disabled={loading}
+                  onFocus={() => setIsFocused(true)}
+                  onBlur={() => setIsFocused(false)}
+                  style={{
+                    flex: 1,
+                    border: "none",
+                    outline: "none",
+                    background: "transparent",
+                    fontSize: 15,
+                    color: "#1f1f1f",
+                    height: "100%",
+                    fontFamily: "var(--font-sans)"
+                  }}
+                />
+
+                {/* Chat / Send Button */}
+                <button
+                  onClick={() => {
+                    if (inputValue.trim()) {
+                      handleSend();
+                    }
+                  }}
+                  disabled={loading}
+                  style={{
+                    background: "transparent",
+                    border: "none",
+                    cursor: inputValue.trim() ? "pointer" : "default",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 32,
+                    height: 32,
+                    color: inputValue.trim() ? "var(--color-text-info)" : "#b0b3b8",
+                    borderRadius: "50%",
+                    transition: "all 0.2s"
+                  }}
+                  onMouseOver={e => {
+                    if (inputValue.trim()) e.currentTarget.style.backgroundColor = "rgba(0, 0, 0, 0.04)";
+                  }}
+                  onMouseOut={e => {
+                    if (inputValue.trim()) e.currentTarget.style.backgroundColor = "transparent";
+                  }}
+                >
+                  {inputValue.trim() ? (
+                    <svg style={{ width: 18, height: 18 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="22" y1="2" x2="11" y2="13" />
+                      <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                    </svg>
+                  ) : (
+                    <svg style={{ width: 18, height: 18 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Toast Notification */}

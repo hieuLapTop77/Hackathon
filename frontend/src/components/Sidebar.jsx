@@ -1,13 +1,23 @@
 import { NavLink, useLocation } from "react-router-dom";
+import {
+  IconChartPie,
+  IconOverview,
+  IconOptimizer,
+  IconSimulator,
+  IconMapPin,
+  IconUpload,
+  IconBot,
+  IconPlane
+} from "./icons";
 
 const NAV = [
-  { to: "/",          icon: "ti-chart-pie",             label: "Dashboard" },
-  { to: "/overview",   icon: "ti-layout-dashboard",      label: "Overview"  },
-  { to: "/optimizer",  icon: "ti-adjustments-horizontal", label: "Optimizer" },
-  { to: "/simulator",  icon: "ti-chart-line",            label: "Simulator" },
-  { to: "/routes",     icon: "ti-map-pin",               label: "Routes"    },
-  { to: "/upload",     icon: "ti-upload",                label: "Upload"    },
-  { to: "/copilot",    icon: "ti-message-chatbot",       label: "Copilot"   },
+  { to: "/",          Icon: IconChartPie,  label: "Dashboard" },
+  { to: "/overview",   Icon: IconOverview,  label: "Overview"  },
+  { to: "/optimizer",  Icon: IconOptimizer, label: "Optimizer" },
+  { to: "/simulator",  Icon: IconSimulator, label: "Simulator" },
+  { to: "/routes",     Icon: IconMapPin,    label: "Routes"    },
+  { to: "/upload",     Icon: IconUpload,    label: "Upload"    },
+  { to: "/copilot",    Icon: IconBot,       label: "Copilot"   },
 ];
 
 export function Sidebar() {
@@ -39,7 +49,7 @@ export function Sidebar() {
         boxShadow: "0 2px 10px rgba(222, 31, 38, 0.1)",
         border: "1px solid rgba(222, 31, 38, 0.15)"
       }}>
-        <i className="ti ti-plane" style={{ fontSize: 18, color: "var(--color-text-info)" }} />
+        <IconPlane size={18} style={{ color: "var(--color-text-info)" }} />
       </div>
 
       {NAV.map(n => {
@@ -76,7 +86,7 @@ export function Sidebar() {
               }
             }}
           >
-            <i className={`ti ${n.icon}`} />
+            <n.Icon size={16} />
           </NavLink>
         );
       })}

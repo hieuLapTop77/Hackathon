@@ -1,4 +1,5 @@
 import { getLFColor } from "../utils/formatters";
+import { IconLoader, IconAlertCircle } from "./icons";
 
 export function Spinner() {
   return (
@@ -6,8 +7,8 @@ export function Spinner() {
       display: "flex", alignItems: "center", justifyContent: "center",
       padding: 32, color: "var(--color-text-secondary)", fontSize: 12,
     }}>
-      <i className="ti ti-loader" style={{ fontSize: 20, marginRight: 8, animation: "spin 1s linear infinite" }} />
-      Dang tai tu API...
+      <IconLoader size={20} style={{ marginRight: 8, animation: "spin 1s linear infinite" }} />
+      Đang tải từ API...
     </div>
   );
 }
@@ -20,8 +21,10 @@ export function ErrorBox({ msg, onRetry }) {
       borderRadius: "var(--border-radius-md)",
       color: "var(--color-text-danger)",
       fontSize: 12,
+      display: "flex",
+      alignItems: "center"
     }}>
-      <i className="ti ti-alert-circle" style={{ marginRight: 6 }} />
+      <IconAlertCircle size={14} style={{ marginRight: 6, flexShrink: 0 }} />
       {msg}
       {onRetry && (
         <button onClick={onRetry} style={{
