@@ -349,6 +349,70 @@ class TraceContextProxy:
 _current_trace = TraceContextProxy()
 
 
+def extract_route(query: str) -> str | None:
+    """Extract route from natural language query using Vietnamese city names or IATA codes."""
+    if not query:
+        return None
+    query_lower = query.lower()
+    
+    aliases = {
+        "SGN": ["thành phố hồ chí minh", "thanh pho ho chi minh", "hồ chí minh", "ho chi minh", "sài gòn", "sai gon", "sgn", "hcm", "tphcm"],
+        "HAN": ["hà nội", "ha noi", "han", "hn"],
+        "DAD": ["đà nẵng", "da nang", "dad", "dn"],
+        "CXR": ["nha trang", "cam ranh", "cxr"],
+        "PQC": ["phú quốc", "phu quoc", "pqc"],
+        "HPH": ["hải phòng", "hai phong", "hph", "cat bi", "cát bi", "hp"]
+    }
+    
+    matches = []
+    for iata, terms in aliases.items():
+        for term in terms:
+            # We want to match whole phrases or boundaries, avoiding partial word matching (like "hn" in "hôm nay")
+            # Using custom word boundaries suitable for Vietnamese characters
+            pattern = r'(?i)(?<=^|[^a-záàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ])' + re.escape(term) + r'(?=$|[^a-záàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ])'
+            for m in re.finditer(pattern, query_lower):
+                matches.append((iata, m.start(), m.end(), len(term)))
+                
+    if not matches:
+        return None
+        
+    # Remove overlapping matches, prioritize longer terms
+    matches.sort(key=lambda x: x[3], reverse=True)
+    final_matches = []
+    for m in matches:
+        overlap = False
+        for accepted in final_matches:
+            if not (m[2] <= accepted[1] or m[1] >= accepted[2]):
+                overlap = True
+                break
+        if not overlap:
+            final_matches.append(m)
+            
+    final_matches.sort(key=lambda x: x[1])
+    
+    unique_iatas = []
+    for m in final_matches:
+        if not unique_iatas or unique_iatas[-1] != m[0]:
+            unique_iatas.append(m[0])
+            
+    if len(unique_iatas) >= 2:
+        loc1_iata, loc1_start, loc1_end, _ = final_matches[0]
+        loc2_iata, loc2_start, loc2_end, _ = final_matches[1]
+        
+        text_before_loc1 = query_lower[:loc1_start]
+        text_between = query_lower[loc1_end:loc2_start]
+        
+        has_from_before_loc1 = any(w in text_before_loc1.split()[-2:] for w in ["từ", "from"]) if text_before_loc1.split() else False
+        has_from_between = any(w in text_between.split() for w in ["từ", "from"])
+        
+        if has_from_between and not has_from_before_loc1:
+            return f"{loc2_iata}-{loc1_iata}"
+        else:
+            return f"{loc1_iata}-{loc2_iata}"
+            
+    return None
+
+
 # ── Node Functions ───────────────────────────────────────────────────────────
 
 def parse_query(state: AgentState) -> dict:
@@ -374,6 +438,9 @@ def parse_query(state: AgentState) -> dict:
         iata_codes = re.findall(r'\b[A-Z]{3}\b', query_upper)
         if len(iata_codes) == 2:
             parsed_route = f"{iata_codes[0]}-{iata_codes[1]}"
+
+    if not parsed_route:
+        parsed_route = extract_route(query)
 
     # 3. Parse date (defaulting 'hôm nay' to June 8, 2026 for hackathon data matching)
     target_date = None
@@ -455,6 +522,7 @@ def query_database(state: AgentState) -> dict:
     target_date = state.get("target_date")
     parsed_route = state.get("parsed_route")
     tools_called = list(state.get("tools_called", []))
+    queries_executed = []
 
     if not search_term:
         if _current_trace:
@@ -465,17 +533,26 @@ def query_database(state: AgentState) -> dict:
         with _connect() as conn:
             cursor = conn.cursor()
 
+            def db_execute(sql, params=None):
+                cleaned_sql = " ".join(sql.strip().split())
+                logger.info(f"Executing SQL: {cleaned_sql} | Params: {params}")
+                queries_executed.append({"sql": cleaned_sql, "params": list(params) if params else []})
+                if params is not None:
+                    cursor.execute(sql, params)
+                else:
+                    cursor.execute(sql)
+
             # Case 1: Route + Date query
             if parsed_route and target_date:
                 # 1. Total flights on this route on this date
-                cursor.execute("""
+                db_execute("""
                     SELECT COUNT(DISTINCT flight_no) FROM flights
                     WHERE route = ? AND flight_date = ?
                 """, (parsed_route, target_date))
                 total_flights = cursor.fetchone()[0] or 0
 
                 # 2. Avg price & load factor on this route on this date
-                cursor.execute("""
+                db_execute("""
                     SELECT AVG(mny_GL_Charges_Total), AVG(LF_by_date) FROM flights
                     WHERE route = ? AND flight_date = ?
                 """, (parsed_route, target_date))
@@ -484,7 +561,7 @@ def query_database(state: AgentState) -> dict:
                 avg_lf = avg_lf or 0.0
 
                 # 3. List of flight details
-                cursor.execute("""
+                db_execute("""
                     SELECT
                         id, flight_no, flight_date, str_Dep, str_Arr, route,
                         mny_GL_Charges_Total AS price, LF_by_date AS lf, lng_Capacity AS capacity,
@@ -527,14 +604,14 @@ def query_database(state: AgentState) -> dict:
             # Case 2: Only Date query (e.g. all flights today)
             elif target_date and not parsed_route and search_term == target_date:
                 # 1. Total flights scheduled today
-                cursor.execute("""
+                db_execute("""
                     SELECT COUNT(DISTINCT flight_no) FROM flights
                     WHERE flight_date = ?
                 """, (target_date,))
                 total_flights = cursor.fetchone()[0] or 0
 
                 # 2. Avg price & load factor today
-                cursor.execute("""
+                db_execute("""
                     SELECT AVG(mny_GL_Charges_Total), AVG(LF_by_date) FROM flights
                     WHERE flight_date = ?
                 """, (target_date,))
@@ -543,7 +620,7 @@ def query_database(state: AgentState) -> dict:
                 avg_lf = avg_lf or 0.0
 
                 # 3. Route breakdown
-                cursor.execute("""
+                db_execute("""
                     SELECT route, COUNT(DISTINCT flight_no) AS flight_cnt, AVG(mny_GL_Charges_Total) AS avg_price, AVG(LF_by_date) AS avg_lf
                     FROM flights
                     WHERE flight_date = ?
@@ -560,7 +637,7 @@ def query_database(state: AgentState) -> dict:
                     })
 
                 # 4. Sample list of flights
-                cursor.execute("""
+                db_execute("""
                     SELECT TOP 20
                         id, flight_no, flight_date, str_Dep, str_Arr, route,
                         mny_GL_Charges_Total AS price, LF_by_date AS lf, lng_Capacity AS capacity,
@@ -601,7 +678,7 @@ def query_database(state: AgentState) -> dict:
 
             # Case 3: Single flight number or fallback single route lookup (original behavior)
             else:
-                cursor.execute("""
+                db_execute("""
                     SELECT TOP 1
                         id, flight_no, flight_date, str_Dep, str_Arr, route,
                         mny_GL_Charges_Total AS price, LF_by_date AS lf, lng_Capacity AS capacity,
@@ -613,7 +690,7 @@ def query_database(state: AgentState) -> dict:
 
                 row = cursor.fetchone()
                 if not row:
-                    cursor.execute("""
+                    db_execute("""
                         SELECT TOP 1
                             id, flight_no, flight_date, str_Dep, str_Arr, route,
                             mny_GL_Charges_Total AS price, LF_by_date AS lf, lng_Capacity AS capacity,
@@ -647,13 +724,20 @@ def query_database(state: AgentState) -> dict:
             cursor.close()
 
         if _current_trace:
-            _current_trace.end_span("query_database", {"found": data is not None})
+            _current_trace.end_span("query_database", {
+                "found": data is not None,
+                "queries_executed": queries_executed
+            })
         return {"flight_data": data, "tools_called": tools_called}
 
     except Exception as ex:
         logger.error(f"DB query failed: {ex}")
         if _current_trace:
-            _current_trace.end_span("query_database", {"found": False, "error": str(ex)})
+            _current_trace.end_span("query_database", {
+                "found": False,
+                "error": str(ex),
+                "queries_executed": queries_executed
+            })
         
         tools_called.append({
             "name": "Query SQL Server (Direct DB)",

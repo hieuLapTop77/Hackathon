@@ -130,6 +130,61 @@ class SemanticCache:
             iata_codes = re.findall(r'\b[A-Z]{3}\b', query_upper)
             if len(iata_codes) == 2:
                 return f"{iata_codes[0]}-{iata_codes[1]}"
+        
+        # Fallback to Vietnamese city names extraction
+        query_lower = query.lower()
+        aliases = {
+            "SGN": ["thành phố hồ chí minh", "thanh pho ho chi minh", "hồ chí minh", "ho chi minh", "sài gòn", "sai gon", "sgn", "hcm", "tphcm"],
+            "HAN": ["hà nội", "ha noi", "han", "hn"],
+            "DAD": ["đà nẵng", "da nang", "dad", "dn"],
+            "CXR": ["nha trang", "cam ranh", "cxr"],
+            "PQC": ["phú quốc", "phu quoc", "pqc"],
+            "HPH": ["hải phòng", "hai phong", "hph", "cat bi", "cát bi", "hp"]
+        }
+        
+        matches = []
+        for iata, terms in aliases.items():
+            for term in terms:
+                pattern = r'(?i)(?<=^|[^a-záàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ])' + re.escape(term) + r'(?=$|[^a-záàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ])'
+                for m in re.finditer(pattern, query_lower):
+                    matches.append((iata, m.start(), m.end(), len(term)))
+                    
+        if not matches:
+            return None
+            
+        matches.sort(key=lambda x: x[3], reverse=True)
+        final_matches = []
+        for m in matches:
+            overlap = False
+            for accepted in final_matches:
+                if not (m[2] <= accepted[1] or m[1] >= accepted[2]):
+                    overlap = True
+                    break
+            if not overlap:
+                final_matches.append(m)
+                
+        final_matches.sort(key=lambda x: x[1])
+        
+        unique_iatas = []
+        for m in final_matches:
+            if not unique_iatas or unique_iatas[-1] != m[0]:
+                unique_iatas.append(m[0])
+                
+        if len(unique_iatas) >= 2:
+            loc1_iata, loc1_start, loc1_end, _ = final_matches[0]
+            loc2_iata, loc2_start, loc2_end, _ = final_matches[1]
+            
+            text_before_loc1 = query_lower[:loc1_start]
+            text_between = query_lower[loc1_end:loc2_start]
+            
+            has_from_before_loc1 = any(w in text_before_loc1.split()[-2:] for w in ["từ", "from"]) if text_before_loc1.split() else False
+            has_from_between = any(w in text_between.split() for w in ["từ", "from"])
+            
+            if has_from_between and not has_from_before_loc1:
+                return f"{loc2_iata}-{loc1_iata}"
+            else:
+                return f"{loc1_iata}-{loc2_iata}"
+                
         return None
 
     def _is_fresh(self, timestamp: float) -> bool:
