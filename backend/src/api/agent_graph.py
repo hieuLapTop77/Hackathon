@@ -1021,10 +1021,21 @@ def check_competitors(state: AgentState) -> dict:
                 "flight_date": p.flight_date,
             })
 
+    summary_parts = []
+    for r in routes_to_check:
+        route_prices = [p for p in all_competitor_data if p["route"] == r]
+        if route_prices:
+            price_details = ", ".join([f"{p['competitor']}: {p['price']:,.0f} VND" for p in route_prices])
+            summary_parts.append(f"{r} ({price_details})")
+        else:
+            summary_parts.append(f"{r} (Không có dữ liệu)")
+            
+    summary_str = "; ".join(summary_parts)
+
     tools_called.append({
         "name": "Competitor Price Check",
         "args": f"routes={routes_to_check}, date={target_date}",
-        "result": f"Thu thập xong giá đối thủ cho các chặng {routes_to_check} ngày {target_date}."
+        "result": f"Thu thập xong giá đối thủ ngày {target_date}: {summary_str}."
     })
 
     if _current_trace:
