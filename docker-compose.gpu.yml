@@ -1,0 +1,211 @@
+# Airline Revenue Optimizer GPU Cluster -- Docker Compose
+# 
+# Usage:
+#   docker compose -f docker-compose.gpu.yml --profile dev up -d
+#   docker compose -f docker-compose.gpu.yml --profile prod up -d
+
+services:
+
+  # ── SQL Server Database ─────────────────────────────────────────────────────
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: airline-sqlserver-gpu
+    user: root
+    restart: unless-stopped
+    profiles:
+      - dev
+      - prod
+    environment:
+      ACCEPT_EULA: Y
+      MSSQL_SA_PASSWORD: ${DB_SA_PASSWORD:-AirlineDB!2024}
+      MSSQL_PID: Express
+    ports:
+      - "1433:1433"
+    volumes:
+      - /raid/sqlserver_data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"${DB_SA_PASSWORD:-AirlineDB!2024}\" -C -Q 'SELECT 1' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - airline-gpu-net
+
+  # ── NVIDIA NIM Self-Hosted Server (8x H200) ──────────────────────────────────
+  vllm:
+    image: nvcr.io/nim/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:latest
+    container_name: airline-vllm
+    restart: unless-stopped
+    profiles:
+      - dev
+      - prod
+    environment:
+      - NGC_API_KEY=${NVIDIA_API_KEY}
+      - NIM_CACHE_PATH=/opt/nim/.cache
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-8}
+      - USERID=0
+    ports:
+      - "8001:8000"
+    volumes:
+      - /raid/vllm_cache:/opt/nim/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - airline-gpu-net
+
+  # ── Qdrant Vector CSDL (RAG Knowledge Base) ──────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: airline-qdrant
+    restart: unless-stopped
+    profiles:
+      - dev
+      - prod
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - /raid/qdrant_data:/qdrant/storage
+    networks:
+      - airline-gpu-net
+
+  # ── Langfuse Observability & Tracing CSDL ────────────────────────────────────
+  langfuse-db:
+    image: postgres:16-alpine
+    container_name: airline-langfuse-db
+    restart: unless-stopped
+    profiles:
+      - dev
+      - prod
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-LangfuseDB!2024}
+    volumes:
+      - /raid/langfuse_db_data:/var/lib/postgresql/data
+    networks:
+      - airline-gpu-net
+
+  # ── Langfuse Server Dashboard ────────────────────────────────────────────────
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: airline-langfuse
+    restart: unless-stopped
+    profiles:
+      - dev
+      - prod
+    depends_on:
+      - langfuse-db
+    ports:
+      - "4000:3000"
+    environment:
+      - DATABASE_URL=postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-LangfuseDB!2024}@langfuse-db:5432/langfuse
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-SuperSecretNextAuthSecret123!}
+      - NEXTAUTH_URL=http://localhost:3000
+      - TELEMETRY_ENABLED=false
+      - SALT=${LANGFUSE_SALT:-SuperSecretLangfuseSaltValue1234567890abcdef0123456789abcdef}
+    networks:
+      - airline-gpu-net
+
+  # ── Backend (FastAPI) ────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    container_name: airline-backend-gpu
+    restart: unless-stopped
+    profiles:
+      - dev
+      - prod
+    ports:
+      - "8020:8000"
+    volumes:
+      - ./backend:/app/backend:ro
+      - ./outputs:/app/outputs
+      - ./data/raw:/app/data/raw:ro
+      - ./data/processed:/app/data/processed
+      - ./kaggle:/app/kaggle:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DB_SERVER=sqlserver
+      - DB_NAME=${DB_NAME:-airline_db}
+      - DB_USER=${DB_USER:-sa}
+      - DB_PASSWORD=${DB_SA_PASSWORD:-AirlineDB!2024}
+      - MSSQL_SA_PASSWORD=${DB_SA_PASSWORD:-AirlineDB!2024}
+      - LLM_MODEL=${LLM_MODEL:-nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4}
+      - VLLM_URL=${VLLM_URL:-http://vllm:8000/v1}
+      - QDRANT_URL=http://qdrant:6333
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-pk-lf-default}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-sk-lf-default}
+      - LANGFUSE_HOST=http://langfuse:3000
+      - ENV=${ENV:-development}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your_jwt_secret_key_here}
+      - DEV_BYPASS_TOKEN=${DEV_BYPASS_TOKEN:-your_dev_bypass_token_here}
+      - TOKEN_GEN_USER=${TOKEN_GEN_USER:-vj_admin}
+      - TOKEN_GEN_PASSWORD=${TOKEN_GEN_PASSWORD:-your_token_generation_password_here}
+      - SERPAPI_KEY=${SERPAPI_KEY:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+      - VLLM_API_KEY=${VLLM_API_KEY:-}
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    networks:
+      - airline-gpu-net
+
+  # ── Frontend dev (Vite hot-reload) ──────────────────────────────────────────
+  frontend-dev:
+    image: node:20-alpine
+    container_name: airline-frontend-dev-gpu
+    restart: unless-stopped
+    profiles:
+      - dev
+    command: >
+      sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - VITE_API_URL=http://localhost:8020/api
+      - VITE_PROXY_TARGET=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - airline-gpu-net
+
+  # ── Frontend production (nginx) ─────────────────────────────────────────────
+  frontend-prod:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+      args:
+        - VITE_API_URL=/api
+    container_name: airline-frontend-prod-gpu
+    restart: unless-stopped
+    profiles:
+      - prod
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - airline-gpu-net
+
+networks:
+  airline-gpu-net:
+    driver: bridge

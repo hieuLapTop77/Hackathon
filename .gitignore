@@ -1,0 +1,43 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.env
+.env.gpu
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Dependency & Temporary folders
+node_modules/
+catboost_info/
+scratch/
+artifacts/
+
+# Data & outputs
+data/
+outputs/
+*.zip
+*.parquet
+
+# Models (download separately)
+*.pkl
+*.joblib
