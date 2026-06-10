@@ -1098,3 +1098,18 @@ def bulk_update_flight_details(updates: list[dict]) -> dict:
         conn.close()
     return {"updated": updated, "failed": failed}
 
+
+def chat_session_exists(session_id: int) -> bool:
+    """Check if a chat session exists in the database."""
+    try:
+        conn = _connect()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM chat_sessions WHERE id = ?", (session_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return row is not None
+    except Exception as ex:
+        logger.error(f"[db] chat_session_exists failed: {ex}")
+        return False
+

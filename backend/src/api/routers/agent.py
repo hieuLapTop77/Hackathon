@@ -119,7 +119,7 @@ from fastapi import BackgroundTasks
 async def agent_chat(req: AgentChatRequest, background_tasks: BackgroundTasks, user: dict = Depends(verify_token), _=Depends(rate_limit_copilot)):
     try:
         session_id = req.session_id
-        if not session_id:
+        if not session_id or not sqlserver.chat_session_exists(session_id):
             # Generate a friendly title from the query
             words = req.query.split()
             title = " ".join(words[:5]) + ("..." if len(words) > 5 else "")
