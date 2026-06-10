@@ -145,7 +145,7 @@ class SemanticCache:
         matches = []
         for iata, terms in aliases.items():
             for term in terms:
-                pattern = r'(?i)(?<=^|[^a-záàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ])' + re.escape(term) + r'(?=$|[^a-záàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ])'
+                pattern = r'(?i)\b' + re.escape(term) + r'\b'
                 for m in re.finditer(pattern, query_lower):
                     matches.append((iata, m.start(), m.end(), len(term)))
                     
