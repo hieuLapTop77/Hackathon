@@ -441,12 +441,18 @@ def parse_query(state: AgentState) -> dict:
     if not parsed_route:
         parsed_route = extract_route(query)
 
-    # 3. Parse date (defaulting 'hôm nay' to June 8, 2026 for hackathon data matching)
+    # 3. Parse date (dynamically resolve 'hôm nay' / 'ngày mai' relative to system clock)
     target_date = None
+    from datetime import datetime, timedelta
+    try:
+        today_dt = datetime.now()
+    except Exception:
+        today_dt = None
+
     if "hôm nay" in query_lower or "today" in query_lower:
-        target_date = "2026-06-08"
+        target_date = today_dt.strftime("%Y-%m-%d") if today_dt else "2026-06-10"
     elif "ngày mai" in query_lower or "tomorrow" in query_lower:
-        target_date = "2026-06-09"
+        target_date = (today_dt + timedelta(days=1)).strftime("%Y-%m-%d") if today_dt else "2026-06-11"
     else:
         # Match YYYY-MM-DD or YYYY/MM/DD specifically for June 2026
         date_match = re.search(r'\b(2026)[-/](0?6)[-/]([0-2]?\d|30)\b', query)
