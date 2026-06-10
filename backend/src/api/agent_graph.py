@@ -1385,6 +1385,7 @@ async def generate_report(state: AgentState) -> dict:
 
         prompt = load_agent_prompt(
             "report_agent_success.md",
+            user_query=state['user_query'],
             data_context=data_context
         )
 
@@ -1407,7 +1408,7 @@ async def generate_report(state: AgentState) -> dict:
         if flight:
             try:
                 report = json.loads(content)
-                message = _format_report_markdown(report, flight, ml_pred, price_comp, adjusted_pred)
+                message = _format_report_markdown(report, flight, ml_pred, price_comp, adjusted_pred, state)
             except json.JSONDecodeError:
                 logger.warning("JSON parse failed, using raw LLM output")
                 message = content
@@ -1439,7 +1440,7 @@ async def generate_report(state: AgentState) -> dict:
     except Exception as ex:
         logger.error(f"LLM call failed: {ex}")
         if flight:
-            message = _fallback_report(flight, opt, comp, ml_pred=ml_pred, price_comparison=price_comp, adjusted_prediction=adjusted_pred)
+            message = _fallback_report(flight, opt, comp, ml_pred=ml_pred, price_comparison=price_comp, adjusted_prediction=adjusted_pred, state=state)
             thinking = "Không thể kết nối vLLM. Sử dụng báo cáo dự phòng."
             report = {
                 "executive_summary": "Báo cáo dự phòng - vLLM offline",
@@ -1753,8 +1754,18 @@ def route_after_tools(state: AgentState) -> str:
 
 # ── Helper Functions ──────────────────────────────────────────────────────────
 
-def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = None, price_comparison: dict | None = None, adjusted_prediction: dict | None = None) -> str:
-    """Convert structured JSON report to display-ready markdown."""
+def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = None, price_comparison: dict | None = None, adjusted_prediction: dict | None = None, state: dict | None = None) -> str:
+    """Convert structured JSON report to display-ready markdown dynamically based on query intent."""
+    query_lower = state.get("user_query", "").lower() if state else ""
+    
+    # Intent detection
+    has_comp_intent = any(kw in query_lower for kw in ["đối thủ", "so sánh", "hãng khác", "bamboo", "vietnam airlines", "compare", "competitor"]) or (state and state.get("comparison_intent"))
+    has_opt_intent = any(kw in query_lower for kw in ["tối ưu", "optimize", "doanh thu", "scipy"])
+    has_ml_intent = any(kw in query_lower for kw in ["dự báo", "dự đoán", "predict", "forecast"])
+    
+    # If no specific intent is detected, show everything as fallback
+    show_all = not (has_comp_intent or has_opt_intent or has_ml_intent)
+
     if flight.get("is_aggregate") == True:
         target_date = flight.get("target_date", "2026-06-08")
         parsed_route = flight.get("parsed_route")
@@ -1777,24 +1788,27 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
                 if len(flight["routes"]) > 5:
                     parts.append(f"*và {len(flight['routes']) - 5} chặng bay khác...*")
 
-        if adjusted_prediction and adjusted_prediction.get("predictions"):
-            parts.append(f"\n#### Dự báo giá vé đã điều chỉnh cạnh tranh (Price Adjustment Agent)")
-            for p in adjusted_prediction["predictions"][:5]:
-                parts.append(f"- Chuyến **{p['flight_no']}** ({p['route']}):")
-                parts.append(f"  * Eco: {p['classes'].get('Eco', 0):,.0f} VND (Gốc ML: {p['original_classes'].get('Eco', 0):,.0f} VND) | Deluxe: {p['classes'].get('Deluxe', 0):,.0f} VND | SkyBoss: {p['classes'].get('SkyBoss', 0):,.0f} VND")
-            if len(adjusted_prediction["predictions"]) > 5:
-                parts.append(f"*và dự báo đã điều chỉnh của {len(adjusted_prediction['predictions']) - 5} chuyến bay khác...*")
-        elif ml_pred and ml_pred.get("predictions"):
-            parts.append(f"\n#### Dự báo giá vé từ mô hình Machine Learning (XGBoost/Ensemble)")
-            for pred in ml_pred["predictions"][:5]:
-                parts.append(f"- Chuyến **{pred['flight_no']}** ({pred['route']}):")
-                parts.append(f"  * Eco: {pred['classes'].get('Eco', 0):,.0f} VND | Deluxe: {pred['classes'].get('Deluxe', 0):,.0f} VND | SkyBoss: {pred['classes'].get('SkyBoss', 0):,.0f} VND")
-            if len(ml_pred["predictions"]) > 5:
-                parts.append(f"*và dự báo giá của {len(ml_pred['predictions']) - 5} chuyến bay khác...*")
-
-        if price_comparison and price_comparison.get("comparison_table"):
+        # Competitor pricing section
+        if (show_all or has_comp_intent) and price_comparison and price_comparison.get("comparison_table"):
             parts.append(f"\n#### Bảng so sánh giá vé đối thủ (Bamboo/Vietnam Airlines)")
             parts.append(price_comparison["comparison_table"])
+
+        # ML and price adjustments sections
+        if show_all or has_ml_intent:
+            if adjusted_prediction and adjusted_prediction.get("predictions"):
+                parts.append(f"\n#### Dự báo giá vé đã điều chỉnh cạnh tranh (Price Adjustment Agent)")
+                for p in adjusted_prediction["predictions"][:5]:
+                    parts.append(f"- Chuyến **{p['flight_no']}** ({p['route']}):")
+                    parts.append(f"  * Eco: {p['classes'].get('Eco', 0):,.0f} VND (Gốc ML: {p['original_classes'].get('Eco', 0):,.0f} VND) | Deluxe: {p['classes'].get('Deluxe', 0):,.0f} VND | SkyBoss: {p['classes'].get('SkyBoss', 0):,.0f} VND")
+                if len(adjusted_prediction["predictions"]) > 5:
+                    parts.append(f"*và dự báo đã điều chỉnh của {len(adjusted_prediction['predictions']) - 5} chuyến bay khác...*")
+            elif ml_pred and ml_pred.get("predictions"):
+                parts.append(f"\n#### Dự báo giá vé từ mô hình Machine Learning (XGBoost/Ensemble)")
+                for pred in ml_pred["predictions"][:5]:
+                    parts.append(f"- Chuyến **{pred['flight_no']}** ({pred['route']}):")
+                    parts.append(f"  * Eco: {pred['classes'].get('Eco', 0):,.0f} VND | Deluxe: {pred['classes'].get('Deluxe', 0):,.0f} VND | SkyBoss: {pred['classes'].get('SkyBoss', 0):,.0f} VND")
+                if len(ml_pred["predictions"]) > 5:
+                    parts.append(f"*và dự báo giá của {len(ml_pred['predictions']) - 5} chuyến bay khác...*")
 
         if report and report.get("executive_summary"):
             parts.append(f"\n**Tóm tắt phân tích:** {report['executive_summary']}")
@@ -1804,31 +1818,37 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
     # Original single flight markdown formatter
     parts = [f"### Báo cáo Phân tích Chuyến bay {flight['flight_no']}"]
 
-    if adjusted_prediction:
-        parts.append(f"\n#### Dự báo giá vé đã điều chỉnh cạnh tranh (Price Adjustment Agent)")
-        parts.append(f"- **Eco:** {adjusted_prediction.get('Eco', 0):,.0f} VND (Giá gốc ML: {ml_pred.get('Eco', 0):,.0f} VND)")
-        parts.append(f"- **Deluxe:** {adjusted_prediction.get('Deluxe', 0):,.0f} VND (Giá gốc ML: {ml_pred.get('Deluxe', 0):,.0f} VND)")
-        parts.append(f"- **SkyBoss:** {adjusted_prediction.get('SkyBoss', 0):,.0f} VND (Giá gốc ML: {ml_pred.get('SkyBoss', 0):,.0f} VND)")
-        parts.append(f"- **Lý do điều chỉnh:** {adjusted_prediction.get('reason', 'Định giá lại để tối ưu hóa tính cạnh tranh với đối thủ.')}")
-    elif ml_pred:
-        parts.append(f"\n#### Dự báo từ mô hình Machine Learning")
-        parts.append(f"- **Eco:** {ml_pred.get('Eco', 0):,.0f} VND")
-        parts.append(f"- **Deluxe:** {ml_pred.get('Deluxe', 0):,.0f} VND")
-        parts.append(f"- **SkyBoss:** {ml_pred.get('SkyBoss', 0):,.0f} VND")
-        parts.append(f"- **GDS (Business):** {ml_pred.get('GDS', 0):,.0f} VND")
+    # Show prediction / adjustments if general query or prediction/competitor intent
+    if show_all or has_ml_intent or has_comp_intent:
+        if adjusted_prediction:
+            parts.append(f"\n#### Dự báo giá vé đã điều chỉnh cạnh tranh (Price Adjustment Agent)")
+            parts.append(f"- **Eco:** {adjusted_prediction.get('Eco', 0):,.0f} VND (Giá gốc ML: {ml_pred.get('Eco', 0):,.0f} VND)")
+            parts.append(f"- **Deluxe:** {adjusted_prediction.get('Deluxe', 0):,.0f} VND (Giá gốc ML: {ml_pred.get('Deluxe', 0):,.0f} VND)")
+            parts.append(f"- **SkyBoss:** {adjusted_prediction.get('SkyBoss', 0):,.0f} VND (Giá gốc ML: {ml_pred.get('SkyBoss', 0):,.0f} VND)")
+            if adjusted_prediction.get('reason'):
+                parts.append(f"- **Lý do điều chỉnh:** {adjusted_prediction.get('reason')}")
+        elif ml_pred:
+            parts.append(f"\n#### Dự báo từ mô hình Machine Learning")
+            parts.append(f"- **Eco:** {ml_pred.get('Eco', 0):,.0f} VND")
+            parts.append(f"- **Deluxe:** {ml_pred.get('Deluxe', 0):,.0f} VND")
+            parts.append(f"- **SkyBoss:** {ml_pred.get('SkyBoss', 0):,.0f} VND")
+            parts.append(f"- **GDS (Business):** {ml_pred.get('GDS', 0):,.0f} VND")
 
+    # Executive Summary (always show if available)
     if report.get("executive_summary"):
         parts.append(f"\n**Tóm tắt:** {report['executive_summary']}")
 
-    if report.get("current_assessment"):
+    # Detailed sections (only show if not empty and query matches intent or show_all)
+    if (show_all or has_opt_intent) and report.get("current_assessment"):
         parts.append(f"\n#### 1. Đánh giá hiện trạng\n{report['current_assessment']}")
 
-    if report.get("competitor_analysis"):
+    if (show_all or has_comp_intent) and report.get("competitor_analysis"):
         parts.append(f"\n#### 2. Phân tích cạnh tranh\n{report['competitor_analysis']}")
 
-    if report.get("mathematical_basis"):
+    if (show_all or has_opt_intent) and report.get("mathematical_basis"):
         parts.append(f"\n#### 3. Cơ sở toán học\n{report['mathematical_basis']}")
 
+    # Recommended Price & Recommendations
     if report.get("recommended_price"):
         confidence_text = {"high": "Cao", "medium": "Trung bình", "low": "Thấp"}.get(report.get("confidence_level", "medium"), "Trung bình")
         parts.append(f"\n#### 4. Khuyến nghị")
@@ -1837,26 +1857,31 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
             parts.append(f"- **Thay đổi:** {report['price_change_pct']:+.1f}%")
         parts.append(f"- **Độ tin cậy:** {confidence_text}")
 
-    if report.get("risk_factors"):
-        parts.append("\n#### Yếu tố rủi ro")
-        for r in report["risk_factors"]:
-            parts.append(f"- {r}")
+    if (show_all or has_opt_intent) and report.get("risk_factors"):
+        # Filter empty items
+        risks = [r for r in report["risk_factors"] if r.strip()]
+        if risks:
+            parts.append("\n#### Yếu tố rủi ro")
+            for r in risks:
+                parts.append(f"- {r}")
 
-    if report.get("action_items"):
-        parts.append("\n#### Hành động đề xuất")
-        for a in report["action_items"]:
-            parts.append(f"- {a}")
+    if (show_all or has_opt_intent) and report.get("action_items"):
+        actions = [a for a in report["action_items"] if a.strip()]
+        if actions:
+            parts.append("\n#### Hành động đề xuất")
+            for a in actions:
+                parts.append(f"- {a}")
 
     return "\n".join(parts)
 
 
-def _fallback_report(flight: dict, opt: dict | None, comp: list | None, ml_pred: dict | None = None, price_comparison: dict | None = None, adjusted_prediction: dict | None = None) -> str:
+def _fallback_report(flight: dict, opt: dict | None, comp: list | None, ml_pred: dict | None = None, price_comparison: dict | None = None, adjusted_prediction: dict | None = None, state: dict | None = None) -> str:
     """Fallback report when vLLM is offline."""
     dummy_report = {
         "executive_summary": "Không thể kết nối với máy chủ AI (vLLM) để nhận phân tích chi tiết. Dưới đây là dữ liệu tổng hợp trực tiếp từ các tác tử chuyên biệt (chế độ dự phòng)."
     }
     
-    body = _format_report_markdown(dummy_report, flight, ml_pred, price_comparison, adjusted_prediction)
+    body = _format_report_markdown(dummy_report, flight, ml_pred, price_comparison, adjusted_prediction, state)
     
     if flight.get("is_aggregate") != True and opt:
         opt_price = opt['optimal_price'] if opt else flight['price']
