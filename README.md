@@ -1,154 +1,191 @@
-# VJ Revenue Optimizer — Trình Tối Ưu Hóa Doanh Thu Hàng Không (Kiến Trúc Tác Tử Thông Minh)
+# VJ Revenue Optimizer — Trình Tối Ưu Hóa Doanh Thu Hàng Không (Agentic AI Copilot)
 
-Dự án áp dụng **Machine Learning** kết hợp **Fullstack Web Application** nhằm dự đoán giá vé máy bay và tối ưu hóa doanh thu của các chuyến bay thương mại. Hệ thống đã được nâng cấp toàn diện sang kiến trúc **Tác tử Thông minh (Agentic AI Copilot)** sử dụng **LangGraph**, tích hợp **Vector DB (Qdrant)**, **3-Layer Semantic Caching**, **4-Layer Safety Guardrails** và giám sát thời gian thực với **Langfuse Observability**.
+Dự án áp dụng **Machine Learning** kết hợp **Fullstack Web Application** nhằm dự đoán giá vé máy bay và tối ưu hóa doanh thu của các chuyến bay thương mại. Hệ thống được xây dựng trên kiến trúc **Tác tử Thông minh (Agentic AI Copilot)** sử dụng **LangGraph** (Supervisor–Worker), vận hành hoàn toàn trên hệ sinh thái **NVIDIA**: Nemotron LLM (self-hosted NIM/vLLM), **NeMo Retriever** (Embedding + Reranking NIM), **NeMo Guardrails**, kết hợp **Qdrant Vector DB**, **Semantic Caching**, **hội thoại đa lượt (Multi-turn)**, **SSE Streaming** và giám sát thời gian thực với **Langfuse Observability**.
 
 ---
 
-## Kiến Trúc Hệ Thống Nâng Cấp (Architecture Overview)
+## Kiến Trúc Hệ Thống (Architecture Overview)
 
 Hệ thống bao gồm 3 thành phần cốt lõi:
 1. **ML Training Pipeline (`kaggle/`)**: Quá trình ETL, xử lý sạch dữ liệu quy nạp (Inductive Imputation), xây dựng đặc trưng nâng cao (30 features), huấn luyện song song 6 mô hình ML và tối ưu hóa trọng số mô hình kết hợp (Weighted Ensemble).
-2. **Backend API (`backend/`)**: FastAPI server chịu trách nhiệm tải dữ liệu chuyến bay từ SQL Server, thực hiện suy luận (inference) thời gian thực thông qua các mô hình ML, chạy bộ tối ưu doanh thu chuyến bay (Revenue Optimizer) sử dụng Scipy, và vận hành **LangGraph Copilot Agent**.
-3. **Frontend Dashboard (`frontend/`)**: Giao diện React người dùng hiện đại xây dựng trên Vite, thiết kế theo tone màu đỏ chủ đạo cao cấp của **Vietjet Air**, hỗ trợ xem danh sách chuyến bay, What-if simulation trực quan, và tích hợp khung chat trao đổi trực tiếp với Copilot Agent để tối ưu hóa giá vé.
+2. **Backend API (`backend/`)**: FastAPI server chịu trách nhiệm tải dữ liệu chuyến bay từ SQL Server, suy luận (inference) thời gian thực qua các mô hình ML, chạy bộ tối ưu doanh thu (Revenue Optimizer) bằng SciPy với **độ co giãn cầu học từ dữ liệu** và **yếu tố thị trường trích xuất bằng LLM**, đồng thời vận hành **LangGraph Copilot Agent**.
+3. **Frontend Dashboard (`frontend/`)**: Giao diện React (Vite) theo tone màu đỏ chủ đạo của **Vietjet Air**: danh sách chuyến bay, What-if simulation, khung chat Copilot với **tiến trình agent hiển thị live (SSE)** và bảng đề xuất giá theo từng chuyến bay / hạng vé.
 
 ```mermaid
 flowchart TD
-    User([Người dùng / Nhà quản trị]) <-->|Chat / Thao tác UI| FE[Frontend Dashboard: React + Vite]
-    FE <-->|REST API / JWT Auth| BE[Backend API: FastAPI]
-    
-    subgraph Engine Tác Tử (LangGraph Copilot Agent)
-        BE <-->|1. Check Cache / Save State| Cache[(3-Layer Semantic Cache: Qdrant + RAM)]
-        BE -->|2. Input Guardrails| Guard[4-Layer Safety Guardrails]
-        Guard -->|3. Run State Machine| Graph[LangGraph State Machine]
-        
-        subgraph Các Node Tác Vụ
-            Graph --> NodeParse[parse_query]
-            Graph --> NodeSup[supervisor]
-            Graph --> NodeDB[query_database]
-            Graph --> NodeML[run_ml_prediction]
-            Graph --> NodeOpt[run_optimizer]
-            Graph --> NodeComp[check_competitors]
-            Graph --> NodeRAG[query_rag]
-            Graph --> NodeReport[generate_report]
-        end
-        
-        NodeDB <-->|Direct Async Connection| DB[(SQL Server Database)]
-        NodeML -->|Model inference| Models[Outputs: XGBoost / LightGBM / RF]
-        NodeOpt -->|SciPy Bounded Optimization| SciPy[Constant-Elasticity Model]
-        NodeRAG <-->|Hybrid Search + Re-rank| Qdrant[(Qdrant Vector DB: Market Intelligence)]
-        
-        NodeSup <-->|Inference / Chat Completion| LLM[Self-Hosted vLLM: NVIDIA Nemotron NIM]
-        NodeReport -->|Structured Output Schema| LLM
+    User([Người dùng / Nhà quản trị]) <-->|Chat đa lượt / Thao tác UI| FE[Frontend Dashboard: React + Vite]
+    FE <-->|REST API + SSE Streaming / JWT Auth| BE[Backend API: FastAPI]
+
+    subgraph Pipeline Xử Lý Một Câu Hỏi
+        BE -->|"1. Guardrails nhanh (regex/PII — 0 LLM call)"| GuardFast[NeMo Guardrails: Deterministic Layer]
+        GuardFast -->|2. Multi-turn Context| Session[Session Context Store]
+        Session -->|3. Semantic Cache Lookup| Cache[(Semantic Cache: RAM + Qdrant)]
+        Cache -->|"4. Cache miss → LLM Self-check"| GuardLLM[NeMo Guardrails: LLM Semantic Layer]
+        GuardLLM -->|5. Run State Machine| Graph[LangGraph Supervisor-Worker]
     end
-    
-    BE -->|Traces & Generations metrics| LF[Langfuse Observability Platform]
+
+    subgraph Các Worker Node
+        Graph --> NodeParse[parse_query]
+        Graph --> NodeSup[supervisor]
+        Graph --> NodeDB[query_database]
+        Graph --> NodeML[run_ml_prediction]
+        Graph --> NodeOpt[run_optimizer]
+        Graph --> NodeComp[check_competitors]
+        Graph --> NodeCompare[price_comparison]
+        Graph --> NodeAdjust[price_adjustment]
+        Graph --> NodeRAG[query_rag]
+        Graph --> NodeReport[generate_report]
+    end
+
+    NodeDB <-->|Direct Async Connection| DB[(SQL Server Database)]
+    NodeML -->|Model inference| Models[XGBoost / LightGBM / Ensemble]
+    NodeOpt -->|"SciPy + Market Factors (demand / sensitivity / cost)"| SciPy[Constant-Elasticity Model]
+    NodeRAG <-->|Hybrid Search| Qdrant[(Qdrant Vector DB)]
+    NodeRAG -->|Re-ranking| NIMRerank[NeMo Retriever: Reranking NIM]
+    Cache <-->|Embeddings| NIMEmbed[NeMo Retriever: Embedding NIM]
+
+    NodeSup <-->|Structured Output| LLM[Self-Hosted NVIDIA Nemotron NIM / vLLM]
+    NodeReport -->|JSON Schema Enforcement| LLM
+
+    BE -->|Traces / Generations / Token usage| LF[Langfuse Observability]
 ```
 
 ---
 
-## Các Công Nghệ & Giải Pháp Cốt Lõi Mới
+## Các Công Nghệ & Giải Pháp Cốt Lõi
 
-### 1. LangGraph State Machine (Supervisor-Worker Pattern)
-Thay vì luồng xử lý tuyến tính cứng nhắc (hard-coded linear flow), hệ thống sử dụng **LangGraph** để xây dựng một máy trạng thái (state machine) linh hoạt:
-*   **Supervisor Node:** Đóng vai trò bộ não điều phối, gọi mô hình ngôn ngữ lớn (LLM) để quyết định Worker Node nào sẽ được thực thi tiếp theo dựa trên câu hỏi của người dùng và trạng thái hiện tại.
-*   **Worker Nodes độc lập:** Phục vụ các tác vụ chuyên biệt: `parse_query` (trích xuất thông tin hành trình/ngày bay), `query_database` (truy vấn DB), `run_ml_prediction` (suy luận giá vé ML), `run_optimizer` (tối ưu hóa doanh thu), `check_competitors` (quét giá đối thủ), `query_rag` (tìm kiếm bối cảnh thị trường), và `generate_report` (xuất báo cáo định dạng JSON có cấu trúc nghiêm ngặt).
+### 1. LangGraph State Machine (Supervisor–Worker Pattern)
+Thay vì luồng xử lý tuyến tính cứng nhắc, hệ thống dùng **LangGraph** xây dựng máy trạng thái linh hoạt theo chiến lược **deterministic-first**:
+*   **Supervisor Node:** Các workflow chuẩn (so sánh giá, điều chỉnh giá, tối ưu hóa) được điều phối bằng rule deterministic — nhanh, rẻ, dễ debug. Chỉ những câu hỏi không khớp rule mới gọi LLM Nemotron (structured output) để quyết định Worker tiếp theo, dựa trên **Agent Registry** (`agents/registry/*.md`).
+*   **Worker Nodes độc lập:** `parse_query` (trích xuất hành trình/ngày/số hiệu, kể cả tên thành phố tiếng Việt), `query_database`, `run_ml_prediction` (dự báo giá Eco/Deluxe/SkyBoss), `run_optimizer`, `check_competitors`, `price_comparison`, `price_adjustment` (đối sánh cạnh tranh kiểu LCC), `query_rag` và `generate_report` (báo cáo JSON schema nghiêm ngặt, render thành **bảng đề xuất giá theo từng chuyến bay / hạng vé** kèm mức thay đổi VND và %).
+*   **Fan-out song song:** Sau khi có dữ liệu chuyến bay, các worker ML + Competitor + RAG chạy song song để giảm tổng độ trễ.
 
-### 2. 3-Layer Semantic Caching (Bộ Nhớ Đệm Ngữ Nghĩa 3 Lớp)
-Giúp giảm từ 70-90% chi phí gọi mô hình ngôn ngữ lớn (LLM) và mang lại tốc độ phản hồi cực nhanh dưới 5ms:
-*   **Layer 1 (Exact Hash Match):** Dùng thuật toán SHA-256 mã hóa câu hỏi để so khớp nhanh trong bộ nhớ RAM tạm thời với thời gian sống TTL (mặc định 2 giờ).
-*   **Layer 2 (Semantic Similarity Match):** Sử dụng mô hình `SentenceTransformer` tạo vector embedding cho câu hỏi và truy vấn độ tương đồng cosine trong **Qdrant Vector DB** với ngưỡng tin cậy cao `threshold >= 0.92`. Nếu trùng khớp ý định, hệ thống trả về kết quả cũ ngay lập tức.
-*   **Layer 3 (Cache Miss):** Khi cả hai tầng cache đều bỏ lỡ, hệ thống mới thực thi luồng tác tử đầy đủ qua LLM, sau đó tự động lưu kết quả mới kèm embedding vào cả hai tầng cache.
-*   **Targeted Invalidation:** Khi người quản trị thực hiện áp dụng giá mới cho một chuyến bay (`/api/flights/{id}/apply`), hệ thống sẽ tự động quét và xóa bỏ (invalidate) các bản ghi cache liên quan đến tuyến bay đó nhằm đảm bảo dữ liệu tư vấn luôn cập nhật.
+### 2. Tối Ưu Doanh Thu với Yếu Tố Thị Trường (Market-Factor-Aware Optimizer)
+Bộ tối ưu SciPy (mô hình cầu co giãn hằng số) được nâng cấp 3 tầng:
+*   **Độ co giãn học từ dữ liệu:** Hồi quy log-log `ln(LF) = α + ε·ln(price)` theo từng chặng bay / hạng vé / mùa vụ, fallback về bảng hiệu chỉnh theo nghiên cứu ngành.
+*   **Trích xuất yếu tố thị trường bằng LLM:** `MarketFactorAgent` đọc bối cảnh RAG và trả về danh sách yếu tố có cấu trúc `{name, type, direction, magnitude, confidence}`; có keyword fallback khi LLM không khả dụng.
+*   **Tổng hợp liên tục, trọng số theo độ tin cậy:** Các yếu tố **cộng gộp và triệt tiêu lẫn nhau** (lễ hội + bão không còn "thắng ăn cả"); độ lớn được nhân với confidence — tín hiệu càng bất định thì điều chỉnh càng bảo thủ. Mỗi loại yếu tố tác động đúng đòn bẩy kinh tế:
+    *   `demand` → dịch chuyển nhu cầu nền (thang exp) + độ co giãn về gần 0;
+    *   `price_sensitivity` → chỉ thay đổi độ co giãn;
+    *   `cost` (nhiên liệu...) → nâng **sàn giá tối thiểu** (`cost_pressure_factor`), không bóp méo đường cầu.
 
-### 3. 4-Layer Safety Guardrails (Hàng Rào Bảo Vệ 4 Lớp)
-Đảm bảo tác tử hoạt động an toàn, chống rò rỉ dữ liệu và ngăn chặn các hành vi phá hoại:
-*   **Layer 1 (Input Guardrail):** Kiểm tra độ dài, phát hiện các mẫu prompt injection thông dụng, lọc các câu hỏi ngoài phạm vi (out-of-scope) và tự động ẩn (redact) thông tin cá nhân (PII - điện thoại, passport, email).
-*   **Layer 2 (Tool-Call Gating):** Kiểm tra tham số đầu vào của các công cụ trước khi chạy thực tế (ví dụ: phát hiện SQL injection trong từ khóa tìm kiếm, kiểm tra giá đề xuất thay đổi có nằm trong khoảng kinh doanh an toàn `50,000` - `50,000,000` VND hay không).
-*   **Layer 3 (Output Guardrail):** Xác minh kết quả trả về của Agent trước khi hiển thị cho người dùng, điều chỉnh mức độ tin cậy và tự động gắn cờ cảnh báo rủi ro nếu mức giá khuyến nghị vi phạm quy tắc thương mại.
-*   **Layer 4 (Content Filtering):** Tự động ẩn các thông tin nhạy cảm vô tình bị lọt vào thông điệp phản hồi của LLM.
+### 3. Semantic Caching (Bộ Nhớ Đệm Ngữ Nghĩa)
+Giảm 70–90% chi phí gọi LLM cho các câu hỏi lặp/tương đồng:
+*   **Layer 1 (Exact Hash):** SHA-256 của câu hỏi (đã trộn ngày được resolve — "hôm nay" hỏi hôm khác sẽ không trùng hash) so khớp trong RAM với TTL (mặc định 2 giờ).
+*   **Layer 2 (Semantic Similarity):** Embedding bằng **NeMo Retriever Embedding NIM** (`nv-embedqa-e5-v5`, fallback SentenceTransformer local), truy vấn cosine ≥ `0.92` trong **Qdrant** với **bộ lọc nghiêm ngặt theo chặng bay + số hiệu chuyến + ngày** — câu hỏi "ngày mai" không bao giờ trả nhầm kết quả cache của "hôm nay".
+*   **Targeted Invalidation:** Áp giá mới qua `/api/flights/{id}/apply` sẽ tự động xóa cache của chặng bay liên quan.
+*   Point ID deterministic (dẫn xuất từ SHA-256) đảm bảo upsert đúng bản ghi qua các lần restart.
 
-### 4. Langfuse Observability & Tracing
-Tích hợp sâu nền tảng **Langfuse** giúp giám sát chi tiết từng bước đi của tác tử:
-*   **Span & Trace:** Theo dõi thời gian thực hiện của từng Node trong LangGraph.
-*   **Generation Logging:** Ghi nhận prompt đầu vào, văn bản đầu ra, model sử dụng, và số lượng token tiêu thụ để tối ưu hóa chi phí.
-*   **Debugging:** Dễ dàng phát hiện các lỗi kết nối vLLM, lỗi logic của Supervisor hoặc lỗi dữ liệu đầu vào.
+### 4. NeMo Guardrails (Thứ Tự Tối Ưu Chi Phí)
+Pipeline an toàn dựa trên **NVIDIA NeMo Guardrails** (Colang flows + custom actions), sắp xếp theo nguyên tắc *rẻ trước — đắt sau*:
+*   **Tầng nhanh (trước cache, 0 LLM call):** kiểm tra độ dài, regex chống prompt injection, lọc out-of-scope, redact PII (SĐT/CCCD/passport/email) — cache hit vì vậy giữ được tốc độ mili-giây.
+*   **Tầng ngữ nghĩa (chỉ chạy khi cache miss):** LLM self-check đầu vào qua Nemotron.
+*   **Tool-Call Gating:** kiểm tra tham số trước khi chạy tool (chống SQL injection, giá đề xuất phải nằm trong khoảng `50,000` – `50,000,000` VND).
+*   **Output Review hợp nhất:** kiểm tra an toàn + lọc PII đầu ra trong **một lượt** Colang flow duy nhất; giá đề xuất được kiểm tra trên dữ liệu có cấu trúc (`report.recommended_price`) thay vì regex toàn văn bản.
 
-### 5. Tối ưu hóa Database (Direct Async DB Connections)
-*   **Loại bỏ MCP Subprocess:** Phiên bản cũ gọi các công cụ database thông qua một tiến trình con (subprocess) chạy script MCP Python, tạo ra độ trễ 200-500ms cho mỗi yêu cầu. Phiên bản mới thực hiện kết nối bất đồng bộ (`asyncio` + direct db connection) trực tiếp vào SQL Server, giúp giảm thiểu độ trễ xuống gần như bằng 0.
-*   *Lưu ý:* File máy chủ MCP (`backend/src/db/mcp_sqlserver.py`) vẫn được giữ lại để phục vụ các máy khách ngoài (external clients) kết nối qua giao thức stdio tiêu chuẩn.
+### 5. Hội Thoại Đa Lượt (Multi-turn) & SSE Streaming
+*   **Multi-turn Context:** Mỗi phiên chat ghi nhớ chặng bay / số hiệu / ngày đã giải quyết (TTL 30 phút). Câu hỏi nối tiếp như *"còn ngày mốt thì sao?"* tự kế thừa chặng bay của lượt trước; cache key được gắn tag ngữ cảnh nên không bao giờ va chạm giữa các phiên.
+*   **SSE Streaming (`POST /api/agent/chat/stream`):** Backend phát sự kiện tiến trình theo từng node LangGraph (*"Đã truy vấn dữ liệu chuyến bay"*, *"Đã tối ưu hóa doanh thu"*...); frontend hiển thị live trong khung "đang suy nghĩ" và tự fallback về `/api/agent/chat` khi streaming không khả dụng.
+
+### 6. NeMo Retriever RAG (Hybrid Search + Re-ranking)
+*   **Hybrid Search:** Dense vector (Embedding NIM) + keyword boost trong Qdrant.
+*   **Cross-encoder Re-ranking:** **Reranking NIM** (`nv-rerankqa-mistral-4b-v3`) chấm lại top candidates, fallback CrossEncoder local.
+*   **Fallback chain đầy đủ:** Qdrant → keyword match → static data; NIM → model local. Hệ thống suy giảm dần (graceful degradation), không chết cứng khi một service down.
+
+### 7. Langfuse Observability & Tracing
+*   **Span & Trace:** Theo dõi thời gian từng Node trong LangGraph (kể cả các yếu tố thị trường được nhận diện cho optimizer).
+*   **Generation Logging:** Prompt vào/ra, model, token tiêu thụ, latency để tối ưu chi phí.
+
+### 8. Tối ưu hóa Database (Direct Async DB Connections)
+*   Kết nối trực tiếp SQL Server (parameterized query, chống SQL injection) thay cho MCP subprocess cũ — giảm 200–500ms độ trễ mỗi yêu cầu.
+*   File MCP Server (`backend/src/db/mcp_sqlserver.py`) vẫn được giữ cho external clients qua giao thức stdio.
 
 ---
 
-## Cấu Trúc Dự Án Cập Nhật (Project Structure)
+## Cấu Trúc Dự Án (Project Structure)
 
 ```text
-├── kaggle/                       # ML TRAINING PIPELINE (Chạy huấn luyện và lưu mô hình)
+├── kaggle/                       # ML TRAINING PIPELINE (Huấn luyện và lưu mô hình)
 │   ├── scripts/
 │   │   └── run_pipeline.py       # Pipeline huấn luyện 6 mô hình ML
 │   └── src/
-│       ├── preprocessor.py       # Điền khuyết quy nạp (Inductive Imputation) & Feature Engineering
-│       └── trainer.py            # Tối ưu hóa trọng số kết hợp (Ensemble Weights) bằng Nelder-Mead
+│       ├── preprocessor.py       # Điền khuyết quy nạp & Feature Engineering
+│       └── trainer.py            # Tối ưu trọng số Ensemble bằng Nelder-Mead
 │
-├── backend/                      # FASTAPI BACKEND SERVER (Phục vụ API & tính toán tối ưu)
-│   ├── config.py                 # Cấu hình môi trường (Directories, DB, API Keys)
+├── backend/                      # FASTAPI BACKEND SERVER
+│   ├── config.py                 # Cấu hình môi trường (Directories, Optimizer bounds)
 │   ├── src/
 │   │   ├── db/
-│   │   │   ├── sqlserver.py      # Kết nối trực tiếp SQL Server
-│   │   │   ├── mcp_sqlserver.py  # MCP Server cho external clients (stdio transport)
-│   │   │   └── mcp_sqlserver_raw.py
+│   │   │   ├── sqlserver.py      # Kết nối trực tiếp SQL Server + chat sessions
+│   │   │   └── mcp_sqlserver.py  # MCP Server cho external clients (stdio)
 │   │   │
 │   │   ├── models/
-│   │   │   ├── trainer.py        # Module hỗ trợ load các mô hình ML (.pkl)
-│   │   │   └── optimizer.py      # Bộ tối ưu doanh thu (Constant-Elasticity Demand Model)
+│   │   │   ├── trainer.py        # Load các mô hình ML (.pkl)
+│   │   │   └── optimizer.py      # Revenue Optimizer (Elasticity + Market Factors + Cost Floor)
 │   │   │
 │   │   └── api/
-│   │       ├── main.py           # Khởi tạo FastAPI & mount các endpoints
-│   │       ├── agent_graph.py    # LangGraph State Machine (supervisor, nodes, Langfuse integration)
-│   │       ├── agent_workflow.py # Copilot Agent phiên bản tuần tự (Fallback)
-│   │       ├── semantic_cache.py # Bộ nhớ đệm 3 lớp (RAM + Qdrant similarity)
-│   │       ├── guardrails.py     # Hàng rào bảo vệ an toàn 4 lớp
-│   │       ├── rag_service.py    # Qdrant RAG Service (Hybrid Search + Cross-Encoder Re-ranking)
+│   │       ├── main.py           # Khởi tạo FastAPI & mount endpoints
+│   │       ├── agent_graph.py    # LangGraph State Machine + Multi-turn + SSE stream
+│   │       ├── semantic_cache.py # Semantic Cache (RAM + Qdrant, filter route/flight/date)
+│   │       ├── guardrails.py     # NeMo Guardrails Pipeline (fast / semantic / output review)
+│   │       ├── guardrails_config/# Colang flows (rails.co) + config.yml
+│   │       ├── rag_service.py    # Qdrant RAG (Hybrid Search + NIM Re-ranking)
 │   │       ├── competitor_service.py # Quét và đối sánh giá đối thủ
-│   │       ├── schemas.py        # Cấu trúc dữ liệu API Pydantic
-│   │       ├── auth.py           # Xác thực JWT Token & Rate Limit
+│   │       ├── schemas.py        # Pydantic request/response models
+│   │       ├── auth.py           # JWT Auth & Rate Limit
 │   │       │
-│   │       └── routers/          # Thư mục chứa các router endpoints cô lập
-│   │           ├── agent.py      # Endpoints chat tác tử (/agent/chat, /agent/status, /agent/sessions)
-│   │           ├── rag.py        # Endpoint refresh dữ liệu thị trường (/rag/refresh)
-│   │           ├── flights.py    # API quản lý chuyến bay và áp dụng giá vé
-│   │           ├── predictions.py# API suy luận giá vé máy bay
-│   │           ├── optimization.py# API tối ưu giá vé bằng SciPy
-│   │           ├── dashboard.py  # API thống kê tổng quan
-│   │           ├── health.py     # API kiểm tra trạng thái hệ thống
-│   │           └── db_ops.py     # API seed dữ liệu ban đầu
+│   │       ├── agents/
+│   │       │   ├── prompts/      # Prompt Markdown: supervisor, report, market_factor...
+│   │       │   └── registry/     # Mô tả năng lực từng Worker Agent (load vào Supervisor)
+│   │       │
+│   │       ├── services/
+│   │       │   ├── nvidia_retriever.py # Singleton NIM Embedding/Rerank client + local fallback
+│   │       │   └── prediction_service.py # Suy luận giá vé theo hạng
+│   │       │
+│   │       └── routers/          # Các router endpoints
+│   │           ├── agent.py      # /agent/chat, /agent/chat/stream (SSE), /agent/sessions
+│   │           ├── rag.py        # /rag/refresh — cập nhật tin tức thị trường
+│   │           ├── flights.py    # Quản lý chuyến bay & áp dụng giá (invalidate cache)
+│   │           ├── predictions.py# Suy luận giá vé ML
+│   │           ├── optimization.py# Tối ưu giá vé SciPy
+│   │           ├── dashboard.py  # Thống kê tổng quan
+│   │           ├── health.py     # Health check (dùng cho Docker healthcheck)
+│   │           └── db_ops.py     # Seed dữ liệu ban đầu
 │   │
-│   └── requirements.txt          # Thư viện cho Backend (FastAPI, LangGraph, Qdrant, Langfuse...)
+│   └── requirements.txt          # FastAPI, LangGraph, Qdrant, Langfuse, NeMo Guardrails...
 │
-├── frontend/                     # REACT/VITE FRONTEND (Giao diện bảng điều khiển & Chat Agent)
-├── outputs/                      # KẾT QUẢ HUẤN LUYỆN (Models lưu dưới dạng .pkl & biểu đồ)
-├── docker-compose.gpu.yml        # Điều phối Container trên GPU Server (H200)
-├── Dockerfile                    # Dockerfile đa tầng (Multi-stage) cho Backend & Frontend
-└── nginx.conf                    # Cấu hình Nginx phục vụ Reverse Proxy cho API và Frontend
+├── frontend/                     # REACT/VITE FRONTEND (Dashboard & Chat Copilot)
+├── outputs/                      # KẾT QUẢ HUẤN LUYỆN (.pkl models & biểu đồ)
+├── docker-compose.gpu.yml        # Điều phối Container trên GPU Server
+├── Dockerfile                    # Multi-stage Dockerfile cho Backend & Frontend
+└── nginx.conf                    # Nginx Reverse Proxy cho Production
 ```
 
 ---
 
 ## Hướng Dẫn Thiết Lập Biến Môi Trường (`.env`)
 
-Sao chép tệp `.env.gpu` thành `.env` ở thư mục gốc và cấu hình đầy đủ các tham số sau:
+Sao chép tệp `.env.gpu` thành `.env` ở thư mục gốc và cấu hình các tham số sau:
 
 ```ini
 # Cấu hình Database
 DB_NAME=airline_db
 DB_SA_PASSWORD=YourSecurePassword123!
 
-# Cấu hình mô hình ngôn ngữ lớn (vLLM / NVIDIA NIM)
+# Cấu hình LLM (NVIDIA Nemotron NIM / vLLM)
 LLM_MODEL=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
 VLLM_URL=http://vllm:8000/v1
 NVIDIA_API_KEY=nvapi-your-key-here
-VLLM_API_KEY=your-vllm-key-here # Nếu dùng vLLM độc lập
+VLLM_API_KEY=your-vllm-key-here          # Nếu dùng vLLM độc lập
 
-# Cấu hình Vector DB (Qdrant)
+# Cấu hình NeMo Retriever (Embedding + Reranking NIM)
+NIM_EMBEDDING_URL=http://nim-embedding:8000/v1
+NIM_RERANK_URL=http://nim-reranker:8000/v1
+EMBEDDING_MODEL=nvidia/nv-embedqa-e5-v5
+RERANK_MODEL=nvidia/nv-rerankqa-mistral-4b-v3
+EMBEDDING_DIM=1024
+
+# Cấu hình Vector DB (Qdrant) & Semantic Cache
 QDRANT_URL=http://qdrant:6333
 CACHE_TTL_HOURS=2.0
 CACHE_SIMILARITY_THRESHOLD=0.92
@@ -159,6 +196,7 @@ LANGFUSE_SECRET_KEY=sk-lf-default
 LANGFUSE_HOST=http://langfuse:3000
 
 # Cấu hình bảo mật API
+ENV=development                          # production để tắt dev-bypass
 JWT_SECRET_KEY=your-jwt-secret-key-32-chars-long
 DEV_BYPASS_TOKEN=your-dev-bypass-token
 TOKEN_GEN_USER=vj_admin
@@ -178,13 +216,13 @@ python kaggle/scripts/run_pipeline.py
 ```
 *Các mô hình và báo cáo so sánh sẽ tự động được lưu vào thư mục `outputs/`.*
 
-#### Bước 2: Khởi chạy Backend API (Cần cài đặt SQL Server, Qdrant và Langfuse cục bộ)
+#### Bước 2: Khởi chạy Backend API (Cần SQL Server, Qdrant và Langfuse cục bộ)
 ```bash
 cd backend
 pip install -r requirements.txt
 uvicorn backend.src.api.main:app --reload --port 8000
 ```
-*Tài liệu API trực quan sẽ khả dụng tại: [http://localhost:8000/docs](http://localhost:8000/docs)*
+*Tài liệu API trực quan: [http://localhost:8000/docs](http://localhost:8000/docs)*
 
 #### Bước 3: Khởi chạy Frontend Dashboard
 ```bash
@@ -192,35 +230,54 @@ cd ../frontend
 npm install
 npm run dev
 ```
-*Mở trình duyệt và truy cập: [http://localhost:3000](http://localhost:3000)*
+*Truy cập: [http://localhost:3000](http://localhost:3000)*
 
 ---
 
 ### Cách 2: Chạy thông qua Docker Compose (Khuyên dùng trên GPU Server)
 
-Dự án hỗ trợ Docker Compose giúp khởi chạy toàn bộ hệ sinh thái (Frontend + Backend + Nginx + vLLM/NIM + Qdrant + Langfuse) trên GPU Server chỉ với một câu lệnh duy nhất:
+Một lệnh duy nhất khởi chạy toàn bộ hệ sinh thái: Frontend + Backend + Nginx + Nemotron NIM + Embedding NIM + Reranking NIM + Qdrant + Langfuse:
 
-#### Khởi chạy môi trường phát triển (Development Profile):
+#### Môi trường phát triển (Development Profile):
 ```bash
 docker compose -f docker-compose.gpu.yml --profile dev up --build -d
 ```
-*   **Frontend**: [http://localhost:3000](http://localhost:3000) (Hỗ trợ Hot Reload)
+*   **Frontend**: [http://localhost:3000](http://localhost:3000) (Hot Reload)
 *   **Backend API**: [http://localhost:8020](http://localhost:8020)
 *   **Qdrant Console**: [http://localhost:6333/dashboard](http://localhost:6333/dashboard)
 *   **Langfuse Dashboard**: [http://localhost:4000](http://localhost:4000)
 
-#### Khởi chạy môi trường Production:
+#### Môi trường Production:
 ```bash
 docker compose -f docker-compose.gpu.yml --profile prod up -d --build
 ```
-*   Hệ thống sẽ đóng gói build tĩnh Frontend và chạy thông qua **Nginx Reverse Proxy**.
-*   **Truy cập Dashboard**: [http://localhost](http://localhost) (Cổng 80 mặc định)
+*   Frontend build tĩnh chạy qua **Nginx Reverse Proxy**.
+*   **Truy cập Dashboard**: [http://localhost](http://localhost) (Cổng 80)
+
+> [!NOTE]
+> Backend có healthcheck tại `/api/health`; các container frontend chỉ khởi động sau khi backend báo healthy.
 
 ---
 
-## Hiệu Năng Các Mô Hỏi Học Máy (Model Rankings)
+## API Endpoints Chính
 
-Hệ thống đã huấn luyện và đánh giá chéo trên tập kiểm thử độc lập gồm **577,448 dòng dữ liệu** (Temporal Split):
+| Endpoint | Phương thức | Mô tả |
+| :--- | :---: | :--- |
+| `/api/agent/chat` | POST | Chat với Copilot Agent (JSON response, hỗ trợ `session_id` đa lượt) |
+| `/api/agent/chat/stream` | POST | Chat với tiến trình agent streaming qua SSE |
+| `/api/agent/sessions` | GET | Danh sách phiên hội thoại |
+| `/api/agent/status` | GET | Trạng thái kết nối vLLM/NIM |
+| `/api/flights/{id}/apply` | POST | Áp dụng giá đề xuất (tự invalidate semantic cache) |
+| `/api/predict` | POST | Suy luận giá vé ML cho một chuyến bay |
+| `/api/optimize` | POST | Tối ưu giá vé bằng SciPy |
+| `/api/rag/refresh` | POST | Cập nhật tin tức thị trường vào Qdrant |
+| `/api/health` | GET | Health check & danh sách model đã load |
+
+---
+
+## Hiệu Năng Các Mô Hình Học Máy (Model Rankings)
+
+Hệ thống đã huấn luyện và đánh giá trên tập kiểm thử độc lập gồm **577,448 dòng dữ liệu** (Temporal Split):
 
 | Xếp Hạng | Mô Hình | MAPE (%) | RMSE (VND) | MAE (VND) | Hệ Số R² | Thời Gian Train |
 | :---: | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -233,12 +290,11 @@ Hệ thống đã huấn luyện và đánh giá chéo trên tập kiểm thử 
 | 7 | **MLP Neural Network** | 46.97% | 1,315,123.65 | 529,591.01 | 0.6616 | ~7641s |
 
 > [!TIP]
-> *   **Weighted Ensemble** kết hợp đầu ra của các mô hình theo tỉ lệ: **66.54% XGBoost**, **33.45% LightGBM** và **0.01% RandomForest**. Sự kết hợp này mang lại hệ số xác định R² cao nhất (**0.7540**) và hạn chế sai số cực đại (RMSE thấp nhất).
-> *   Chi tiết về cách xử lý tiền dữ liệu, điền khuyết quy nạp và phân tích độ ảnh hưởng của biến (SHAP value), xem thêm tại tài liệu: [ML_EXPLANATION.md](file:///d:/LLM/ML_EXPLANATION.md).
-> *   Dự án đã được tối ưu hóa cho hệ sinh thái phần cứng & phần mềm của **NVIDIA** (chạy GPU gốc cho XGBoost/LightGBM/CatBoost, tăng tốc Random Forest qua **RAPIDS cuML**, tích hợp **NIM** & **NeMo Agent** để tự động gom dữ liệu). Xem chi tiết tại [Mục 10 của ML_EXPLANATION.md](file:///d:/LLM/ML_EXPLANATION.md#10-kien-truc-tu-dong-hoa-data-pipeline--toi-uu-hoa-tren-he-sinh-thai-nvidia).
+> *   **Weighted Ensemble** kết hợp đầu ra theo tỉ lệ: **66.54% XGBoost**, **33.45% LightGBM**, **0.01% RandomForest** — đạt R² cao nhất (**0.7540**) và RMSE thấp nhất.
+> *   Dự án được tối ưu cho hệ sinh thái **NVIDIA**: GPU-native training cho XGBoost/LightGBM/CatBoost, tăng tốc Random Forest qua **RAPIDS cuML**, suy luận và RAG qua **NIM** + **NeMo Retriever**.
 
 ---
 
 ## Tài Liệu Tham Khảo Liên Quan
-*   [SETUP.md](file:///d:/LLM/SETUP.md): Hướng dẫn chi tiết thiết lập môi trường, danh sách các API endpoints và tham số.
-*   [ML_EXPLANATION.md](file:///d:/LLM/ML_EXPLANATION.md): Tài liệu chuyên sâu về giải thuật Machine Learning, Feature Engineering, cách chia tập dữ liệu, kết quả thực nghiệm và tích hợp NVIDIA.
+*   [SETUP.md](SETUP.md): Hướng dẫn chi tiết thiết lập môi trường, danh sách API endpoints và tham số.
+*   [ML_EXPLANATION.md](ML_EXPLANATION.md): Tài liệu chuyên sâu về giải thuật ML, Feature Engineering, kết quả thực nghiệm và tích hợp NVIDIA.
