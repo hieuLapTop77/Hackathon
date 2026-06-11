@@ -155,6 +155,11 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
       - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
       - VLLM_API_KEY=${VLLM_API_KEY:-}
+      - NIM_EMBEDDING_URL=${NIM_EMBEDDING_URL:-}
+      - NIM_RERANK_URL=${NIM_RERANK_URL:-}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nvidia/embed-qa-4}
+      - RERANK_MODEL=${RERANK_MODEL:-nvidia/reranking-nv-embed-qa-4}
+      - EMBEDDING_DIM=${EMBEDDING_DIM:-1024}
     depends_on:
       sqlserver:
         condition: service_healthy
@@ -203,6 +208,52 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    networks:
+      - airline-gpu-net
+
+  # ── NeMo Retriever: Embedding NIM ────────────────────────────────────────────
+  nim-embedding:
+    image: nvcr.io/nim/nvidia/nv-embedqa-e5-v5:latest
+    container_name: airline-nim-embedding
+    restart: unless-stopped
+    profiles:
+      - dev
+      - prod
+    environment:
+      - NGC_API_KEY=${NVIDIA_API_KEY}
+    ports:
+      - "8010:8000"    # Embedding API trên port 8010
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']    # Chỉ dùng GPU 0
+              capabilities: [gpu]
+    shm_size: '16gb'
+    networks:
+      - airline-gpu-net
+
+  # ── NeMo Retriever: Reranking NIM ───────────────────────────────────────────
+  nim-reranker:
+    image: nvcr.io/nim/nvidia/nv-rerankqa-mistral-4b-v3:latest
+    container_name: airline-nim-reranker
+    restart: unless-stopped
+    profiles:
+      - dev
+      - prod
+    environment:
+      - NGC_API_KEY=${NVIDIA_API_KEY}
+    ports:
+      - "8011:8000"    # Reranking API trên port 8011
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']    # Dùng GPU 1
+              capabilities: [gpu]
+    shm_size: '16gb'
     networks:
       - airline-gpu-net
 
