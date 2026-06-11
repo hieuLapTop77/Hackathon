@@ -20,7 +20,11 @@ import json
 import hashlib
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# Relative dates must resolve in VN local time, not the container clock
+# (usually UTC), to stay consistent with agent_graph's date parsing.
+VN_TZ = timezone(timedelta(hours=7), name="Asia/Ho_Chi_Minh")
 from backend.src.api.services.nvidia_retriever import (
     get_embeddings_client,
     get_embedding_dim,
@@ -207,14 +211,14 @@ class SemanticCache:
     def _parse_date_tag(self, query: str) -> str:
         """
         Resolve the date mentioned in the query to an absolute YYYY-MM-DD tag.
-        Relative terms (hôm nay/ngày mai) are resolved against the system clock so
+        Relative terms (hôm nay/ngày mai) are resolved against VN local time so
         semantically-similar queries about different dates never share a cache entry.
         Returns "" when no date is mentioned.
         """
         if not query:
             return ""
         q = query.lower()
-        today = datetime.now()
+        today = datetime.now(tz=VN_TZ)
 
         if any(k in q for k in ["hôm nay", "hom nay", "today"]):
             return today.strftime("%Y-%m-%d")

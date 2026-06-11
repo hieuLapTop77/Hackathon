@@ -16,8 +16,19 @@ import logging
 import asyncio
 import httpx
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 from dataclasses import dataclass, field
+
+# All relative-date phrases ("hôm nay", "ngày mai") must resolve against
+# Vietnam local time, not the container clock (usually UTC — 7h behind,
+# which shifts "today" to yesterday every morning VN time).
+VN_TZ = timezone(timedelta(hours=7), name="Asia/Ho_Chi_Minh")
+
+
+def vn_now() -> datetime:
+    """Current datetime in Vietnam local time (UTC+7)."""
+    return datetime.now(tz=VN_TZ)
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
@@ -482,11 +493,10 @@ def parse_query(state: AgentState) -> dict:
     if not parsed_route:
         parsed_route = extract_route(query)
 
-    # 3. Parse date (dynamically resolve 'hôm nay' / 'ngày mai' relative to system clock)
+    # 3. Parse date (dynamically resolve 'hôm nay' / 'ngày mai' in VN local time)
     target_date = None
-    from datetime import datetime, timedelta
     try:
-        today_dt = datetime.now()
+        today_dt = vn_now()
     except Exception:
         today_dt = None
 
@@ -630,8 +640,9 @@ def query_database(state: AgentState) -> dict:
                 total_flights = cursor.fetchone()[0] or 0
 
                 # 2. Avg price & load factor on this route on this date
+                # NULLIF excludes 0-VND rows (missing booking data) from the average
                 db_execute("""
-                    SELECT AVG(mny_GL_Charges_Total), AVG(LF_by_date) FROM flights
+                    SELECT AVG(NULLIF(mny_GL_Charges_Total, 0)), AVG(LF_by_date) FROM flights
                     WHERE route = ? AND flight_date = ?
                 """, (parsed_route, target_date))
                 avg_price, avg_lf = cursor.fetchone()
@@ -694,8 +705,9 @@ def query_database(state: AgentState) -> dict:
                 total_flights = cursor.fetchone()[0] or 0
 
                 # 2. Avg price & load factor today
+                # NULLIF excludes 0-VND rows (missing booking data) from the average
                 db_execute("""
-                    SELECT AVG(mny_GL_Charges_Total), AVG(LF_by_date) FROM flights
+                    SELECT AVG(NULLIF(mny_GL_Charges_Total, 0)), AVG(LF_by_date) FROM flights
                     WHERE flight_date = ?
                 """, (target_date,))
                 avg_price, avg_lf = cursor.fetchone()
@@ -704,7 +716,7 @@ def query_database(state: AgentState) -> dict:
 
                 # 3. Route breakdown
                 db_execute("""
-                    SELECT route, COUNT(DISTINCT flight_no) AS flight_cnt, AVG(mny_GL_Charges_Total) AS avg_price, AVG(LF_by_date) AS avg_lf
+                    SELECT route, COUNT(DISTINCT flight_no) AS flight_cnt, AVG(NULLIF(mny_GL_Charges_Total, 0)) AS avg_price, AVG(LF_by_date) AS avg_lf
                     FROM flights
                     WHERE flight_date = ?
                     GROUP BY route
@@ -2105,6 +2117,32 @@ def route_after_tools(state: AgentState) -> str:
 
 # ── Helper Functions ──────────────────────────────────────────────────────────
 
+# Fares below this floor are treated as data anomalies (missing/partial booking
+# data), not real prices: excluded from deltas and flagged in tables.
+PRICE_FLOOR_VND = float(os.getenv("PRICE_FLOOR_VND", "100000"))
+
+
+def _fmt_price_cell(price) -> str:
+    """Format a price cell, flagging missing (0) and below-floor anomalies."""
+    try:
+        price = float(price or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+    if price <= 0:
+        return "N/A"
+    if price < PRICE_FLOOR_VND:
+        return f"{price:,.0f} ⚠"
+    return f"{price:,.0f}"
+
+
+def _class_order_warning(classes: dict) -> bool:
+    """True when a higher fare class is predicted cheaper than a lower one."""
+    eco = classes.get("Eco") or 0
+    deluxe = classes.get("Deluxe") or 0
+    skyboss = classes.get("SkyBoss") or 0
+    return bool((eco and deluxe and deluxe < eco) or (deluxe and skyboss and skyboss < deluxe))
+
+
 def _fmt_delta(new_price: float, base_price: float) -> str:
     """Format an absolute + percentage price delta cell for markdown tables."""
     try:
@@ -2114,6 +2152,9 @@ def _fmt_delta(new_price: float, base_price: float) -> str:
         return "—"
     if base_price <= 0 or new_price <= 0:
         return "—"
+    if base_price < PRICE_FLOOR_VND:
+        # A % vs an anomalous base (e.g. 54,000 VND) would read +300% and mislead
+        return "— (giá hiện tại bất thường)"
     diff = new_price - base_price
     pct = diff / base_price * 100.0
     if abs(pct) < 0.05:
@@ -2164,34 +2205,39 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
         # ML and price adjustments sections — comparison tables so the reader
         # sees exactly which flight, which fare class, and how much
         if show_all or has_ml_intent:
+            agg_preds = None
             if adjusted_prediction and adjusted_prediction.get("predictions"):
                 parts.append(f"\n#### Đề xuất giá vé theo từng chuyến bay (đã điều chỉnh cạnh tranh)")
-                parts.append("| Chuyến bay | Giá hiện tại (VND) | Eco đề xuất (VND) | Thay đổi giá Eco | Deluxe (VND) | SkyBoss (VND) |")
-                parts.append("| :--- | ---: | ---: | :--- | ---: | ---: |")
-                preds = adjusted_prediction["predictions"]
-                for p in preds[:10]:
-                    cur = p.get("current_price") or 0
-                    eco = p["classes"].get("Eco", 0)
-                    parts.append(
-                        f"| **VJ{str(p['flight_no']).replace('VJ', '')}** | {cur:,.0f} | {eco:,.0f} | {_fmt_delta(eco, cur)} "
-                        f"| {p['classes'].get('Deluxe', 0):,.0f} | {p['classes'].get('SkyBoss', 0):,.0f} |"
-                    )
-                if len(preds) > 10:
-                    parts.append(f"*và {len(preds) - 10} chuyến bay Vietjet khác...*")
+                parts.append("| Chuyến bay | Giá hiện tại (VND) | Eco đề xuất (VND) | Chênh lệch Eco vs giá đề xuất | Deluxe (VND) | SkyBoss (VND) |")
+                agg_preds = adjusted_prediction["predictions"]
             elif ml_pred and ml_pred.get("predictions"):
                 parts.append(f"\n#### Dự báo giá vé theo từng chuyến bay (mô hình Machine Learning)")
-                parts.append("| Chuyến bay | Giá hiện tại (VND) | Eco dự báo (VND) | Thay đổi giá Eco | Deluxe (VND) | SkyBoss (VND) |")
+                parts.append("| Chuyến bay | Giá hiện tại (VND) | Eco dự báo (VND) | Chênh lệch Eco vs giá dự báo | Deluxe (VND) | SkyBoss (VND) |")
+                agg_preds = ml_pred["predictions"]
+
+            if agg_preds:
                 parts.append("| :--- | ---: | ---: | :--- | ---: | ---: |")
-                preds = ml_pred["predictions"]
-                for pred in preds[:10]:
-                    cur = pred.get("current_price") or 0
-                    eco = pred["classes"].get("Eco", 0)
+                has_anomaly = False
+                has_class_inversion = False
+                for p in agg_preds[:10]:
+                    cur = p.get("current_price") or 0
+                    classes = p["classes"]
+                    eco = classes.get("Eco", 0)
+                    if cur <= 0 or (0 < cur < PRICE_FLOOR_VND):
+                        has_anomaly = True
+                    inversion = _class_order_warning(classes)
+                    has_class_inversion = has_class_inversion or inversion
                     parts.append(
-                        f"| **VJ{str(pred['flight_no']).replace('VJ', '')}** | {cur:,.0f} | {eco:,.0f} | {_fmt_delta(eco, cur)} "
-                        f"| {pred['classes'].get('Deluxe', 0):,.0f} | {pred['classes'].get('SkyBoss', 0):,.0f} |"
+                        f"| **VJ{str(p['flight_no']).replace('VJ', '')}** | {_fmt_price_cell(cur)} | {eco:,.0f} | {_fmt_delta(eco, cur)} "
+                        f"| {classes.get('Deluxe', 0):,.0f} | {classes.get('SkyBoss', 0):,.0f}{' ⚠' if inversion else ''} |"
                     )
-                if len(preds) > 10:
-                    parts.append(f"*và {len(preds) - 10} chuyến bay Vietjet khác...*")
+                if len(agg_preds) > 10:
+                    parts.append(f"*và {len(agg_preds) - 10} chuyến bay Vietjet khác...*")
+                parts.append("\n*Cột chênh lệch so sánh giá thực tế hiện tại với giá mô hình đưa ra — không phải biến động giá thị trường.*")
+                if has_anomaly:
+                    parts.append(f"*N/A / ⚠ ở cột giá hiện tại: chưa có dữ liệu booking hoặc giá thấp bất thường (< {PRICE_FLOOR_VND:,.0f} VND) — đã loại khỏi giá trung bình và cột chênh lệch.*")
+                if has_class_inversion:
+                    parts.append("*⚠ ở cuối dòng: hạng vé cao có giá dự báo thấp hơn hạng dưới (SkyBoss < Deluxe hoặc Deluxe < Eco) — cần kiểm tra lại dữ liệu đầu vào hoặc mô hình.*")
 
         if report and report.get("executive_summary"):
             parts.append(f"\n**Tóm tắt phân tích:** {report['executive_summary']}")
@@ -2218,6 +2264,8 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
                 parts.append(
                     f"| **{cls}** | {proposed:,.0f} | {(ml_pred or {}).get(cls, 0):,.0f} | {_delta_for(cls, proposed)} |"
                 )
+            if _class_order_warning(adjusted_prediction):
+                parts.append("\n*⚠ Hạng vé cao có giá đề xuất thấp hơn hạng dưới — cần kiểm tra lại dữ liệu đầu vào hoặc mô hình.*")
             if adjusted_prediction.get('reason'):
                 parts.append(f"\n- **Lý do điều chỉnh:** {adjusted_prediction.get('reason')}")
         elif ml_pred:
@@ -2228,6 +2276,8 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
                 if cls in ml_pred:
                     label = "GDS (Business)" if cls == "GDS" else cls
                     parts.append(f"| **{label}** | {ml_pred.get(cls, 0):,.0f} | {_delta_for(cls, ml_pred.get(cls, 0))} |")
+            if _class_order_warning(ml_pred):
+                parts.append("\n*⚠ Hạng vé cao có giá dự báo thấp hơn hạng dưới — cần kiểm tra lại dữ liệu đầu vào hoặc mô hình.*")
 
     # Executive Summary (always show if available)
     if report.get("executive_summary"):

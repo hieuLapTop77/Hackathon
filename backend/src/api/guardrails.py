@@ -70,6 +70,25 @@ class GuardrailsPipeline:
         r"(?i)(bomb|weapon|vũ khí|thuốc nổ|ma túy|drug)",
     ]
 
+    # ── Tín hiệu trong phạm vi nghiệp vụ (whitelist) ────────────────
+    # Câu hỏi phải chứa ít nhất một tín hiệu nghiệp vụ kiểm soát giá vé.
+    # Không có tín hiệu nào → từ chối lịch sự kèm gợi ý, thay vì để LLM
+    # trả lời lan man ngoài phạm vi (đặt vé hộ, tư vấn du lịch, hỏi đáp chung).
+    IN_SCOPE_PATTERNS = [
+        r"(?i)(giá|vé|fare|price|pricing)",
+        r"(?i)(chuyến bay|flight|chặng bay|route|bay từ|bay đi|bay về|bay ra|bay vào)",
+        r"(?i)(doanh thu|revenue|tối ưu|optimize|yield)",
+        r"(?i)(load factor|lấp đầy|tỷ lệ lấp)",
+        r"(?i)(dự báo|dự đoán|predict|forecast)",
+        r"(?i)(đối thủ|cạnh tranh|competitor|bamboo|vietnam airlines|vietravel)",
+        r"(?i)\bVJ\s?\d{2,4}\b",
+        r"\b[A-Z]{3}\s?-\s?[A-Z]{3}\b",
+        r"(?i)(eco|deluxe|skyboss|hạng vé|fare family|fare class)",
+        r"(?i)(thị trường|market|nhu cầu|demand|mùa cao điểm)",
+        # Follow-up đa lượt chỉ nêu mốc thời gian ("còn ngày mai thì sao?")
+        r"(?i)(hôm nay|hom nay|ngày mai|ngay mai|ngày mốt|ngày kia|cuối tuần|tuần sau|today|tomorrow|weekend)",
+    ]
+
     # ── Mẫu nhận dạng thông tin cá nhân (PII) ──────────────────────
     PII_PATTERNS = [
         # Số điện thoại VN: bắt buộc prefix 0/+84/84 để không redact nhầm
@@ -85,6 +104,7 @@ class GuardrailsPipeline:
     def __init__(self):
         self._compiled_injection = [re.compile(p) for p in self.INJECTION_PATTERNS]
         self._compiled_oos = [re.compile(p) for p in self.OUT_OF_SCOPE_PATTERNS]
+        self._compiled_in_scope = [re.compile(p) for p in self.IN_SCOPE_PATTERNS]
         self._compiled_pii = [(re.compile(p), name) for p, name in self.PII_PATTERNS]
 
         # Khởi tạo NeMo Guardrails từ config path
@@ -133,6 +153,16 @@ class GuardrailsPipeline:
         for pattern in self._compiled_oos:
             if pattern.search(query):
                 return {"blocked": True, "reason": "Câu hỏi nằm ngoài phạm vi hệ thống tối ưu doanh thu."}
+
+        if not any(p.search(query) for p in self._compiled_in_scope):
+            return {
+                "blocked": True,
+                "reason": (
+                    "Câu hỏi nằm ngoài phạm vi nghiệp vụ kiểm soát giá vé. "
+                    "Vui lòng hỏi về giá vé, chuyến bay, dự báo giá, đối thủ cạnh tranh "
+                    "hoặc tối ưu doanh thu (ví dụ: 'giá chuyến bay DAD-SGN hôm nay')."
+                ),
+            }
 
         return {"blocked": False}
 
