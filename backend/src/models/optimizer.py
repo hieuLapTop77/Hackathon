@@ -208,7 +208,10 @@ def clear_elasticity_cache():
 
 def optimize_flight(base_price: float, base_lf: float, capacity: int,
                     elasticity: float = None, route: str = None,
-                    fare_class: str = None, month: int = None) -> dict:
+                    fare_class: str = None, month: int = None,
+                    demand_shift_factor: float = 1.0,
+                    elasticity_adjustment: float = 0.0,
+                    cost_pressure_factor: float = 1.0) -> dict:
     """
     Find optimal ticket price to maximize revenue using Constant-Elasticity Demand model.
     
@@ -222,6 +225,11 @@ def optimize_flight(base_price: float, base_lf: float, capacity: int,
         route: Route code for elasticity estimation (e.g. "SGN-HAN")
         fare_class: Fare class for elasticity estimation
         month: Month for seasonal elasticity adjustment
+        demand_shift_factor: Multiplier to adjust the baseline demand/load factor (e.g. 1.25 for +25% demand)
+        elasticity_adjustment: Shift applied to price elasticity (e.g. +0.25 to make it less price sensitive)
+        cost_pressure_factor: Multiplier (>= 1.0) raising the price floor when operating
+            costs rise (e.g. fuel price spikes). Cost factors affect the feasible price
+            range, NOT the demand curve — keep them out of elasticity.
     """
     # Safe checks for inputs
     if base_price is None or pd.isna(base_price) or float(base_price) <= 0.0:
@@ -247,12 +255,24 @@ def optimize_flight(base_price: float, base_lf: float, capacity: int,
     else:
         source = "override"
 
-    lower_bound = base_price * PRICE_LOWER_BOUND_PCT
+    # Apply dynamic market adjustment (from RAG context/events)
+    original_elasticity = elasticity
+    elasticity = elasticity + elasticity_adjustment
+    # Clamp to reasonable range
+    elasticity = max(-2.5, min(-0.3, elasticity))
+
+    # Apply dynamic demand shift
+    adjusted_base_lf = min(1.0, max(0.01, base_lf * demand_shift_factor))
+
+    cost_pressure_factor = max(1.0, float(cost_pressure_factor or 1.0))
+    lower_bound = base_price * PRICE_LOWER_BOUND_PCT * cost_pressure_factor
     upper_bound = base_price * PRICE_UPPER_BOUND_PCT
+    # Keep the search interval valid even under extreme cost pressure
+    lower_bound = min(lower_bound, upper_bound * 0.99)
 
     # Minimize negative expected revenue
     def objective(price_candidate):
-        lf_candidate = base_lf * ((price_candidate / base_price) ** elasticity)
+        lf_candidate = adjusted_base_lf * ((price_candidate / base_price) ** elasticity)
         lf_clamped = min(1.0, max(0.0, lf_candidate))
         expected_revenue = price_candidate * capacity * lf_clamped
         return -expected_revenue
@@ -260,7 +280,7 @@ def optimize_flight(base_price: float, base_lf: float, capacity: int,
     res = minimize_scalar(objective, bounds=(lower_bound, upper_bound), method='bounded')
 
     optimal_price = float(res.x)
-    optimal_lf = min(1.0, max(0.0, base_lf * ((optimal_price / base_price) ** elasticity)))
+    optimal_lf = min(1.0, max(0.0, adjusted_base_lf * ((optimal_price / base_price) ** elasticity)))
 
     base_revenue = base_price * capacity * base_lf
     optimal_revenue = optimal_price * capacity * optimal_lf
@@ -271,12 +291,18 @@ def optimize_flight(base_price: float, base_lf: float, capacity: int,
 
     # Recommendation text
     price_diff = abs(optimal_price - base_price)
+    
+    # Format adjustments explanation for recommendation text
+    adj_info = ""
+    if demand_shift_factor != 1.0 or elasticity_adjustment != 0.0:
+        adj_info = f" [Đã điều chỉnh do bối cảnh: Nhu cầu x{demand_shift_factor:.2f}, ε thay đổi {elasticity_adjustment:+.2f}]"
+        
     if price_change_pct > 2.0:
-        recommendation = f"Nhu cầu co giãn thuận lợi (ε={elasticity:.2f}). Khuyến nghị TĂNG giá bán lên {optimal_price:,.0f} VND (Tăng {price_diff:,.0f} VND, +{price_change_pct:.1f}%) để tối ưu doanh thu."
+        recommendation = f"Nhu cầu co giãn thuận lợi (ε={elasticity:.2f}){adj_info}. Khuyến nghị TĂNG giá bán lên {optimal_price:,.0f} VND (Tăng {price_diff:,.0f} VND, +{price_change_pct:.1f}%) để tối ưu doanh thu."
     elif price_change_pct < -2.0:
-        recommendation = f"Hệ số lấp đầy thấp, nhu cầu nhạy cảm giá (ε={elasticity:.2f}). Khuyến nghị GIẢM giá xuống {optimal_price:,.0f} VND (Giảm {price_diff:,.0f} VND, {price_change_pct:.1f}%) để kích cầu."
+        recommendation = f"Hệ số lấp đầy thấp, nhu cầu nhạy cảm giá (ε={elasticity:.2f}){adj_info}. Khuyến nghị GIẢM giá xuống {optimal_price:,.0f} VND (Giảm {price_diff:,.0f} VND, {price_change_pct:.1f}%) để kích cầu."
     else:
-        recommendation = f"Giá bán hiện tại đang gần tối ưu (ε={elasticity:.2f}). Giữ nguyên mức giá này."
+        recommendation = f"Giá bán hiện tại đang gần tối ưu (ε={elasticity:.2f}){adj_info}. Giữ nguyên mức giá này."
 
     return {
         "base_price": round(base_price, -3),
@@ -288,6 +314,10 @@ def optimize_flight(base_price: float, base_lf: float, capacity: int,
         "recommendation": recommendation,
         "elasticity_used": round(elasticity, 3),
         "elasticity_source": source,
+        "original_elasticity": round(original_elasticity, 3),
+        "demand_shift_factor": demand_shift_factor,
+        "elasticity_adjustment": elasticity_adjustment,
+        "cost_pressure_factor": cost_pressure_factor
     }
 
 

@@ -151,6 +151,46 @@ PRICING_REPORT_SCHEMA = {
 }
 
 
+# ── JSON Schema for Market Factor Extraction (Optimizer adjustments) ──────────
+MARKET_FACTORS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "factors": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Tên ngắn gọn của yếu tố thị trường"
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": ["demand", "price_sensitivity", "cost"],
+                        "description": "Loại tác động: nhu cầu / độ nhạy giá / chi phí khai thác"
+                    },
+                    "direction": {
+                        "type": "integer",
+                        "enum": [-1, 1],
+                        "description": "Hướng tác động: 1 = tăng, -1 = giảm"
+                    },
+                    "magnitude": {
+                        "type": "number",
+                        "description": "Độ lớn tác động (0.0 - 1.0)"
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Độ tin cậy của nhận định (0.0 - 1.0)"
+                    }
+                },
+                "required": ["name", "type", "direction", "magnitude", "confidence"]
+            }
+        }
+    },
+    "required": ["factors"]
+}
+
+
 # ── Reducer Functions for Parallel Node Execution ─────────────────────────────
 def reduce_tools_called(left: list, right: list) -> list:
     """Merge tools_called list, preserving order and removing duplicates."""
@@ -946,7 +986,132 @@ def run_ml_prediction(state: AgentState) -> dict:
         }
 
 
-def run_optimizer(state: AgentState) -> dict:
+def _keyword_market_factors(rag_context: str) -> list[dict]:
+    """
+    Keyword-based fallback for market factor extraction when the LLM is
+    unavailable. Unlike the old elif chain, factors are ADDITIVE — a festival
+    and a storm in the same context both contribute and partially offset.
+    """
+    rl = rag_context.lower()
+    factors = []
+    if any(t in rl for t in ["lễ hội", "festival", "tết", "concert", "cao điểm", "pháo hoa", "diff", "biển nha trang"]):
+        factors.append({"name": "Sự kiện/lễ hội cao điểm (keyword)", "type": "demand",
+                        "direction": 1, "magnitude": 0.75, "confidence": 0.8})
+    if any(t in rl for t in ["tuần lễ du lịch", "mùa du lịch hè", "tăng mạnh", "tăng vọt"]):
+        factors.append({"name": "Mùa du lịch / nhu cầu tăng (keyword)", "type": "demand",
+                        "direction": 1, "magnitude": 0.5, "confidence": 0.7})
+    if any(t in rl for t in ["mưa lớn kéo dài", "cảnh báo mưa lớn", "bão", "thiên tai", "hoãn lịch trình"]):
+        factors.append({"name": "Thời tiết bất lợi (keyword)", "type": "demand",
+                        "direction": -1, "magnitude": 0.55, "confidence": 0.8})
+    if any(t in rl for t in ["săn sale", "khuyến mãi lớn", "kích cầu", "thấp điểm"]):
+        factors.append({"name": "Thấp điểm / khuyến mãi kích cầu (keyword)", "type": "price_sensitivity",
+                        "direction": 1, "magnitude": 0.6, "confidence": 0.7})
+    if any(t in rl for t in ["nhiên liệu", "jet a1"]) and "tăng" in rl:
+        factors.append({"name": "Giá nhiên liệu Jet A1 tăng (keyword)", "type": "cost",
+                        "direction": 1, "magnitude": 0.4, "confidence": 0.6})
+    return factors
+
+
+def _clamp01(value, default: float = 0.0) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+async def extract_market_factors(rag_context: str, route: str = "", target_date: str = "") -> list[dict]:
+    """
+    Extract structured market factors from RAG context via LLM structured output.
+    Falls back to keyword heuristics when the LLM call or parsing fails.
+    """
+    try:
+        prompt = load_agent_prompt(
+            "market_factor_agent.md",
+            rag_context=rag_context,
+            route=route or "N/A",
+            target_date=target_date or "N/A",
+        )
+        content, _reasoning, _usage = await call_nim_llm(
+            prompt=prompt,
+            schema=MARKET_FACTORS_SCHEMA,
+            temperature=0.1,
+            max_tokens=1024,
+        )
+        data = json.loads(content)
+        raw_factors = data.get("factors", []) if isinstance(data, dict) else []
+
+        factors = []
+        for f in raw_factors:
+            if not isinstance(f, dict):
+                continue
+            ftype = f.get("type")
+            if ftype not in ("demand", "price_sensitivity", "cost"):
+                continue
+            try:
+                direction = 1 if float(f.get("direction", 0)) > 0 else -1
+            except (TypeError, ValueError):
+                continue
+            factors.append({
+                "name": str(f.get("name", "unnamed"))[:120],
+                "type": ftype,
+                "direction": direction,
+                "magnitude": _clamp01(f.get("magnitude")),
+                "confidence": _clamp01(f.get("confidence")),
+            })
+        logger.info(f"[Market Factors] LLM extracted {len(factors)} factors from RAG context.")
+        return factors
+    except Exception as e:
+        logger.warning(f"Market factor extraction via LLM failed ({e}). Using keyword fallback.")
+        return _keyword_market_factors(rag_context)
+
+
+def compose_market_adjustments(factors: list[dict]) -> dict:
+    """
+    Compose extracted market factors into optimizer adjustments.
+
+    Direction comes from factor semantics; MAGNITUDE is scaled by confidence —
+    uncertain signals shrink toward neutral instead of being applied at full
+    strength (high volatility => smaller, more conservative price moves):
+      - demand factors        -> demand_shift (exp of summed impact) and elasticity
+                                 (high demand => less price-sensitive, ε toward 0)
+      - price_sensitivity     -> elasticity only (more sensitive => ε more negative)
+      - cost factors          -> price floor only (never the demand curve)
+    """
+    DEMAND_SHIFT_GAIN = 0.30      # exp(0.30 * 0.75) ≈ 1.25 — matches old peak-event step
+    ELASTICITY_GAIN = 0.25
+    COST_PRESSURE_GAIN = 0.10
+
+    d_score = s_score = c_score = 0.0
+    for f in factors:
+        impact = f["direction"] * f["magnitude"] * f["confidence"]
+        if f["type"] == "demand":
+            d_score += impact
+        elif f["type"] == "price_sensitivity":
+            s_score += impact
+        elif f["type"] == "cost":
+            c_score += impact
+
+    import math
+    demand_shift = math.exp(DEMAND_SHIFT_GAIN * max(-1.5, min(1.5, d_score)))
+    demand_shift = max(0.70, min(1.40, demand_shift))
+
+    elasticity_adj = ELASTICITY_GAIN * d_score - ELASTICITY_GAIN * s_score
+    elasticity_adj = max(-0.30, min(0.30, elasticity_adj))
+
+    cost_pressure = 1.0 + COST_PRESSURE_GAIN * max(0.0, c_score)
+    cost_pressure = min(1.15, cost_pressure)
+
+    return {
+        "demand_shift_factor": round(demand_shift, 3),
+        "elasticity_adjustment": round(elasticity_adj, 3),
+        "cost_pressure_factor": round(cost_pressure, 3),
+        "demand_score": round(d_score, 3),
+        "sensitivity_score": round(s_score, 3),
+        "cost_score": round(c_score, 3),
+    }
+
+
+async def run_optimizer(state: AgentState) -> dict:
     """Run SciPy revenue optimizer with data-driven elasticity."""
     global _current_trace
     if _current_trace:
@@ -976,29 +1141,19 @@ def run_optimizer(state: AgentState) -> dict:
         except Exception:
             pass
 
-    # Parse RAG context for events to calculate optimization modifiers
+    # Extract structured market factors from RAG context (LLM structured output
+    # with keyword fallback), then compose them into continuous, confidence-weighted
+    # optimizer adjustments — replaces the old single-winner elif keyword chain.
     rag_context = state.get("rag_context") or ""
-    demand_shift = 1.0
-    elasticity_adj = 0.0
-
+    market_factors: list[dict] = []
     if rag_context:
-        rag_lower = rag_context.lower()
-        # 1. High-demand events / Festivals / Holidays
-        if any(term in rag_lower for term in ["lễ hội", "festival", "tết", "concert", "cao điểm", "pháo hoa", "diff", "biển nha trang"]):
-            demand_shift = 1.25
-            elasticity_adj = 0.25  # Make elasticity less negative (less price sensitive)
-        # 2. Strong general travel weeks
-        elif any(term in rag_lower for term in ["tuần lễ du lịch", "mùa du lịch hè", "tăng mạnh", "tăng vọt"]):
-            demand_shift = 1.15
-            elasticity_adj = 0.15
-        # 3. Adverse weather
-        elif any(term in rag_lower for term in ["mưa lớn kéo dài", "cảnh báo mưa lớn", "bão", "thiên tai", "hoãn lịch trình"]):
-            demand_shift = 0.85
-            elasticity_adj = -0.15  # Make elasticity more negative (more price sensitive, stimulate demand)
-        # 4. Promo sales / Low season stimulation
-        elif any(term in rag_lower for term in ["săn sale", "khuyến mãi lớn", "kích cầu", "thấp điểm"]):
-            demand_shift = 1.10
-            elasticity_adj = -0.20  # High price sensitivity
+        market_factors = await extract_market_factors(
+            rag_context, route=route, target_date=str(flight_date) if flight_date else ""
+        )
+    adjustments = compose_market_adjustments(market_factors)
+    demand_shift = adjustments["demand_shift_factor"]
+    elasticity_adj = adjustments["elasticity_adjustment"]
+    cost_pressure = adjustments["cost_pressure_factor"]
 
     opt = optimize_flight(
         base_price=flight["price"],
@@ -1008,13 +1163,19 @@ def run_optimizer(state: AgentState) -> dict:
         fare_class=fare_class,
         month=month,
         demand_shift_factor=demand_shift,
-        elasticity_adjustment=elasticity_adj
+        elasticity_adjustment=elasticity_adj,
+        cost_pressure_factor=cost_pressure
     )
+    opt["market_factors"] = market_factors
     elasticity_info = f", ε={opt.get('elasticity_used', -1.2):.2f} ({opt.get('elasticity_source', 'default')})"
-    
+
     rag_info = ""
-    if demand_shift != 1.0 or elasticity_adj != 0.0:
-        rag_info = f", RAG điều chỉnh: Nhu cầu x{demand_shift:.2f}, ε thay đổi {elasticity_adj:+.2f}"
+    if demand_shift != 1.0 or elasticity_adj != 0.0 or cost_pressure != 1.0:
+        factor_names = ", ".join(f["name"] for f in market_factors[:4]) or "n/a"
+        rag_info = (
+            f", Yếu tố thị trường [{factor_names}]: Nhu cầu x{demand_shift:.2f}, "
+            f"ε thay đổi {elasticity_adj:+.2f}, sàn giá x{cost_pressure:.2f}"
+        )
 
     tools_called.append({
         "name": "Revenue Optimizer (SciPy + Data-Driven Elasticity)",
@@ -1027,7 +1188,9 @@ def run_optimizer(state: AgentState) -> dict:
             "optimal_price": opt["optimal_price"],
             "elasticity": opt.get("elasticity_used"),
             "demand_shift_factor": demand_shift,
-            "elasticity_adjustment": elasticity_adj
+            "elasticity_adjustment": elasticity_adj,
+            "cost_pressure_factor": cost_pressure,
+            "market_factors": [f["name"] for f in market_factors]
         })
 
     return {"optimizer_result": opt, "tools_called": tools_called}
@@ -1436,10 +1599,20 @@ async def generate_report(state: AgentState) -> dict:
             price_diff = opt['optimal_price'] - base_price
             diff_str = f"Tăng {price_diff:,.0f} VND" if price_diff > 0 else f"Giảm {abs(price_diff):,.0f} VND" if price_diff < 0 else "Giữ nguyên"
             
-            # Format RAG parameters if applied
+            # Format market factor adjustments if applied
             rag_details = ""
             if opt.get("demand_shift_factor", 1.0) != 1.0 or opt.get("elasticity_adjustment", 0.0) != 0.0:
-                rag_details = f"\n- Điều chỉnh nhu cầu nền (RAG): x{opt['demand_shift_factor']:.2f}\n- Điều chỉnh độ co giãn cầu (RAG): {opt['elasticity_adjustment']:+.2f} (Độ co giãn gốc: {opt.get('original_elasticity', -1.2):.2f} -> Độ co giãn sử dụng: {opt['elasticity_used']:.2f})"
+                rag_details = f"\n- Điều chỉnh nhu cầu nền (yếu tố thị trường): x{opt['demand_shift_factor']:.2f}\n- Điều chỉnh độ co giãn cầu: {opt['elasticity_adjustment']:+.2f} (Độ co giãn gốc: {opt.get('original_elasticity', -1.2):.2f} -> Độ co giãn sử dụng: {opt['elasticity_used']:.2f})"
+            if opt.get("cost_pressure_factor", 1.0) != 1.0:
+                rag_details += f"\n- Áp lực chi phí khai thác: sàn giá tối thiểu nâng x{opt['cost_pressure_factor']:.2f}"
+            if opt.get("market_factors"):
+                type_labels = {"demand": "nhu cầu", "price_sensitivity": "độ nhạy giá", "cost": "chi phí"}
+                factor_lines = "\n".join(
+                    f"  * {f['name']} ({type_labels.get(f['type'], f['type'])} {'tăng' if f['direction'] > 0 else 'giảm'}, "
+                    f"độ lớn {f['magnitude']:.1f}, tin cậy {f['confidence']:.1f})"
+                    for f in opt["market_factors"][:5]
+                )
+                rag_details += f"\n- Các yếu tố thị trường được nhận diện:\n{factor_lines}"
                 
             sections.append(f"""KẾT QUẢ TỐI ƯU HÓA DOANH THU (SciPy) VIETJET:
 - Giá tối ưu khuyến nghị: {opt['optimal_price']:,.0f} VND ({diff_str}, {opt['price_change_pct']:+.1f}%){rag_details}
