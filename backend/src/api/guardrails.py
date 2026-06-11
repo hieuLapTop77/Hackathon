@@ -87,6 +87,11 @@ class GuardrailsPipeline:
         r"(?i)(thị trường|market|nhu cầu|demand|mùa cao điểm)",
         # Follow-up đa lượt chỉ nêu mốc thời gian ("còn ngày mai thì sao?")
         r"(?i)(hôm nay|hom nay|ngày mai|ngay mai|ngày mốt|ngày kia|cuối tuần|tuần sau|today|tomorrow|weekend)",
+        # Chào hỏi / cảm ơn / hỏi cách dùng — cho qua để trợ lý trả lời
+        # thân thiện và hướng dẫn câu hỏi nghiệp vụ, không chặn cứng
+        r"(?i)(chào|xin chao|chao ban|hello|\bhi\b|\bhey\b|cảm ơn|cam on|thank)",
+        r"(?i)(giúp|tro giup|help|hướng dẫn|huong dan|sử dụng|su dung|cách dùng|cach dung)",
+        r"(?i)(bạn là ai|ban la ai|who are you|làm được gì|lam duoc gi|what can you do|chức năng|chuc nang|feature)",
     ]
 
     # ── Mẫu nhận dạng thông tin cá nhân (PII) ──────────────────────
