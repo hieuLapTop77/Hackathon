@@ -1,0 +1,63 @@
+# ── Định nghĩa các câu lệnh đầu vào của User ──────────────────────────────────────
+
+define user check input
+  "CHECK_INPUT: $query"
+
+define user check output
+  "CHECK_OUTPUT: $message"
+
+# ── Định nghĩa phản hồi của Bot ───────────────────────────────────────────────
+
+define bot refuse request
+  "BLOCKED: $reason"
+
+define bot allow request
+  "ALLOWED: $text"
+
+define bot refuse output
+  "BLOCKED: $reason"
+
+define bot allow output
+  "ALLOWED: $text"
+
+# ── Luồng kiểm tra An toàn Đầu vào (Input Guardrails Flow) ──────────────────────
+
+define flow check input safety
+  user check input
+
+  # 1. Chạy Custom Action để quét Regex và kiểm tra Độ dài
+  $check_res = execute check_input_safety(query=$query)
+  if $check_res.blocked
+    bot refuse request(reason=$check_res.reason)
+    stop
+
+  # 2. Gọi LLM của NVIDIA để đánh giá ngữ nghĩa (Semantic Self-check)
+  $llm_allowed = execute self_check_input(query=$query)
+  if not $llm_allowed
+    bot refuse request(reason="Phát hiện yêu cầu không an toàn hoặc ngoài phạm vi qua phân tích LLM.")
+    stop
+
+  # 3. Chạy Custom Action quét và che giấu PII (Mã hóa Passport, SĐT, CCCD, Email...)
+  $sanitized = execute redact_pii_input(query=$query)
+  bot allow request(text=$sanitized.result)
+
+# ── Luồng kiểm tra An toàn Đầu ra (Output Guardrails Flow) ─────────────────────
+
+define flow check output safety
+  user check output
+
+  # 1. Chạy Custom Action kiểm tra tính hợp lệ của giá trị kinh doanh (Price bounds 50k-50m)
+  $check_res = execute check_output_safety(response=$message)
+  if $check_res.blocked
+    bot refuse output(reason=$check_res.reason)
+    stop
+
+  # 2. Gọi LLM của NVIDIA để đánh giá ngữ nghĩa phản hồi (Semantic Self-check)
+  $llm_allowed = execute self_check_output(text=$message)
+  if not $llm_allowed
+    bot refuse output(reason="Hệ thống phát hiện nội dung phản hồi của Bot không an toàn hoặc chứa lỗi dữ liệu qua phân tích LLM.")
+    stop
+
+  # 3. Chạy Custom Action quét và làm sạch PII bị lọt vào output
+  $sanitized = execute redact_pii_output(text=$message)
+  bot allow output(text=$sanitized.result)

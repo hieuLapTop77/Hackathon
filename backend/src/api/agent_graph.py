@@ -1990,7 +1990,7 @@ async def run_copilot_graph(user_query: str) -> dict:
 
     # ── Layer 1: Input Guardrails ────────────────────────────────
     guardrails = get_guardrails()
-    input_check = guardrails.check_input(user_query)
+    input_check = await guardrails.check_input(user_query)
     if input_check.blocked:
         return {
             "thinking": "Guardrails: Input blocked.",
@@ -2076,12 +2076,12 @@ async def run_copilot_graph(user_query: str) -> dict:
         }
 
         # ── Layer 4: Output Guardrails ──────────────────────────
-        output_check = guardrails.check_output(response)
+        output_check = await guardrails.check_output(response)
         if output_check.blocked:
             response["message"] += f"\n\n**Guardrail Warning:** {output_check.reason}"
             response["guardrail"] = {"blocked": False, "warning": output_check.reason}
 
-        response["message"] = guardrails.filter_output_content(response["message"])
+        response["message"] = await guardrails.filter_output_content(response["message"])
 
         # Store in cache
         route = flight.get("route", "")

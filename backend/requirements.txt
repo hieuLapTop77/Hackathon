@@ -30,3 +30,4 @@ google-search-results>=2.4.0
 PyJWT>=2.8.0
 gdown>=5.0.0
 langchain-nvidia-ai-endpoints>=0.1.0
+nemoguardrails>=0.9.0

@@ -1,0 +1,7 @@
+models:
+  - type: main
+    engine: openai
+    model: $LLM_MODEL
+    parameters:
+      base_url: $VLLM_URL
+      api_key: $NVIDIA_API_KEY
