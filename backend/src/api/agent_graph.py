@@ -1670,6 +1670,57 @@ async def run_supervisor_node(state: AgentState) -> dict:
     rag_context = state.get("rag_context")
     error = state.get("error")
     tools_called = [t["name"] for t in state.get("tools_called", [])]
+    adjusted_prediction_result = state.get("adjusted_prediction_result")
+
+    # Intent detection
+    user_query_lower = user_query.lower()
+    is_comparison = state.get("comparison_intent") or any(kw in user_query_lower for kw in ["đối thủ", "so sánh", "bamboo", "vietnam airlines", "cạnh tranh", "compare", "competitor"])
+    is_adjustment = any(kw in user_query_lower for kw in ["điều chỉnh", "cập nhật", "khuyến nghị giá", "adjust", "recommendation"])
+    is_optimization = any(kw in user_query_lower for kw in ["tối ưu", "optimize", "doanh thu", "scipy"])
+
+    # Rule-based routing guardrails
+    next_agent_override = None
+    reasoning_override = ""
+
+    # Rule 1: Always query database if a target is parsed but database query has not run
+    if search_term and not any("Query SQL Server" in t for t in tools_called):
+        next_agent_override = "DatabaseAgent"
+        reasoning_override = "Cần truy vấn dữ liệu chuyến bay trước từ cơ sở dữ liệu."
+
+    # Rule 2: Handle Comparison Intent Workflow
+    elif is_comparison:
+        if not competitor_data and "Competitor Price Check" not in tools_called:
+            next_agent_override = "CompetitorAgent"
+            reasoning_override = "Yêu cầu so sánh giá đối thủ cần lấy dữ liệu giá của Bamboo/Vietnam Airlines."
+        elif competitor_data and "Price Comparison Agent" not in tools_called:
+            next_agent_override = "PriceComparisonAgent"
+            reasoning_override = "Đã có dữ liệu đối thủ, cần tiến hành lập bảng so sánh giá vé."
+
+    # Rule 3: Handle Price Adjustment Workflow
+    elif is_adjustment:
+        if not ml_prediction_result and not any("ML Model" in t for t in tools_called):
+            next_agent_override = "MLPredictionAgent"
+            reasoning_override = "Cần chạy dự báo giá từ mô hình Machine Learning làm cơ sở điều chỉnh."
+        elif not competitor_data and "Competitor Price Check" not in tools_called:
+            next_agent_override = "CompetitorAgent"
+            reasoning_override = "Cần lấy thông tin giá của đối thủ để đối sánh cạnh tranh."
+        elif not adjusted_prediction_result and "Price Adjustment Agent" not in tools_called:
+            next_agent_override = "PriceAdjustmentAgent"
+            reasoning_override = "Đã thu thập đủ dự báo ML và đối thủ, tiến hành điều chỉnh giá để tăng sức cạnh tranh."
+
+    # Rule 4: Handle Optimization Workflow
+    elif is_optimization:
+        if flight_data and not flight_data.get("is_aggregate") and "Revenue Optimizer" not in tools_called:
+            next_agent_override = "OptimizerAgent"
+            reasoning_override = "Cần thực hiện tối ưu hóa doanh thu bằng SciPy cho chuyến bay cụ thể."
+
+    if next_agent_override:
+        logger.info(f"[Routing Override] Bypassing LLM routing. Next: {next_agent_override} | Reason: {reasoning_override}")
+        return {
+            "next_agent": next_agent_override,
+            "iteration_count": iteration_count,
+            "thinking": f"Supervisor (Deterministic Override): Chọn {next_agent_override} vì {reasoning_override}"
+        }
 
     # Context about which agents have already run
     progress_details = []
@@ -1979,7 +2030,16 @@ def build_copilot_graph() -> StateGraph:
     )
 
     # Workers route back to the supervisor
-    graph.add_edge("query_database", "supervisor")
+    graph.add_conditional_edges(
+        "query_database",
+        route_after_db,
+        {
+            "run_ml_prediction": "run_ml_prediction",
+            "check_competitors": "check_competitors",
+            "query_rag": "query_rag",
+            "supervisor": "supervisor"
+        }
+    )
     graph.add_edge("check_competitors", "supervisor")
     graph.add_edge("run_ml_prediction", "supervisor")
     graph.add_edge("run_optimizer", "supervisor")

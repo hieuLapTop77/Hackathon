@@ -236,7 +236,7 @@ services:
 
   # ── NeMo Retriever: Reranking NIM ───────────────────────────────────────────
   nim-reranker:
-    image: nvcr.io/nim/nvidia/nv-rerankqa-mistral-4b-v3:latest
+    image: nvcr.io/nim/nvidia/nv-rerankqa-mistral-4b-v3:1.0.2
     container_name: airline-nim-reranker
     restart: unless-stopped
     profiles:
