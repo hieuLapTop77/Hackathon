@@ -732,48 +732,125 @@ export function CopilotPage() {
                       </details>
                     )}
 
-                    {/* Markdown text parser */}
+                    {/* Markdown text parser (bold, bullets, headings, tables) */}
                     <div style={{ whiteSpace: "pre-wrap" }}>
-                      {m.text.split("\n").map((line, lIdx) => {
-                        let renderedLine = line;
-                        const isBullet = line.startsWith("* ") || line.startsWith("- ");
-                        const isNumbered = /^\d+\.\s/.test(line);
-                        
-                        const parts = renderedLine.split("**");
-                        const contentElements = parts.map((part, pIdx) => {
-                          if (pIdx % 2 === 1) {
-                            return <strong key={pIdx} style={{ fontWeight: 800, color: m.role === "user" ? "#ffffff" : "var(--color-text-info)" }}>{part}</strong>;
-                          }
-                          return part;
-                        });
+                      {(() => {
+                        const renderInline = (text, keyPrefix) =>
+                          text.split("**").map((part, pIdx) => (
+                            pIdx % 2 === 1
+                              ? <strong key={`${keyPrefix}-${pIdx}`} style={{ fontWeight: 800, color: m.role === "user" ? "#ffffff" : "var(--color-text-info)" }}>{part}</strong>
+                              : part
+                          ));
 
-                        if (isBullet) {
-                          return <div key={lIdx} style={{ marginLeft: 16, marginBottom: 4, display: "list-item", listStyleType: "disc" }}>{contentElements}</div>;
-                        }
-                        if (isNumbered) {
-                          return <div key={lIdx} style={{ marginLeft: 16, marginBottom: 4, display: "list-item", listStyleType: "decimal" }}>{contentElements}</div>;
-                        }
-                        return <div key={lIdx} style={{ marginBottom: 6 }}>{contentElements}</div>;
-                      })}
+                        const cellStyle = {
+                          border: "1px solid var(--color-border-tertiary)",
+                          padding: "6px 10px",
+                          whiteSpace: "nowrap",
+                          textAlign: "left"
+                        };
+
+                        const elements = [];
+                        let tableBuf = [];
+
+                        const flushTable = (key) => {
+                          if (tableBuf.length === 0) return;
+                          const rows = tableBuf.map(l => l.split("|").slice(1, -1).map(c => c.trim()));
+                          const header = rows[0] || [];
+                          const body = rows.slice(1).filter(r => !r.every(c => /^:?-{2,}:?$/.test(c)));
+                          elements.push(
+                            <div key={key} style={{ overflowX: "auto", margin: "10px 0" }}>
+                              <table style={{ borderCollapse: "collapse", fontSize: 12.5, width: "100%" }}>
+                                <thead>
+                                  <tr>
+                                    {header.map((c, i) => (
+                                      <th key={i} style={{ ...cellStyle, background: "var(--color-background-tertiary)", fontWeight: 800 }}>
+                                        {renderInline(c, `th${i}`)}
+                                      </th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {body.map((r, ri) => (
+                                    <tr key={ri}>
+                                      {r.map((c, ci) => (
+                                        <td key={ci} style={cellStyle}>{renderInline(c, `td${ri}-${ci}`)}</td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          );
+                          tableBuf = [];
+                        };
+
+                        (m.text || "").split("\n").forEach((line, lIdx) => {
+                          const trimmed = line.trim();
+                          if (trimmed.startsWith("|") && trimmed.endsWith("|") && trimmed.length > 2) {
+                            tableBuf.push(trimmed);
+                            return;
+                          }
+                          flushTable(`tbl-${lIdx}`);
+
+                          const headingMatch = trimmed.match(/^(#{2,5})\s+(.*)/);
+                          if (headingMatch) {
+                            const level = headingMatch[1].length;
+                            elements.push(
+                              <div key={lIdx} style={{
+                                fontWeight: 800,
+                                fontSize: level <= 3 ? 15 : 13.5,
+                                margin: "10px 0 6px 0",
+                                color: m.role === "user" ? "#ffffff" : "var(--color-text-primary)"
+                              }}>
+                                {renderInline(headingMatch[2], `h-${lIdx}`)}
+                              </div>
+                            );
+                            return;
+                          }
+
+                          const isBullet = line.startsWith("* ") || line.startsWith("- ");
+                          const isNumbered = /^\d+\.\s/.test(line);
+                          const contentElements = renderInline(line, `l-${lIdx}`);
+
+                          if (isBullet) {
+                            elements.push(<div key={lIdx} style={{ marginLeft: 16, marginBottom: 4, display: "list-item", listStyleType: "disc" }}>{contentElements}</div>);
+                          } else if (isNumbered) {
+                            elements.push(<div key={lIdx} style={{ marginLeft: 16, marginBottom: 4, display: "list-item", listStyleType: "decimal" }}>{contentElements}</div>);
+                          } else {
+                            elements.push(<div key={lIdx} style={{ marginBottom: 6 }}>{contentElements}</div>);
+                          }
+                        });
+                        flushTable("tbl-end");
+                        return elements;
+                      })()}
                     </div>
 
-                    {/* Tools Info */}
+                    {/* Tools Info — collapsed by default: execution detail for devs/judges,
+                        end users only see the answer itself */}
                     {m.tools && m.tools.length > 0 && (
-                      <div style={{
-                        marginTop: 16,
-                        paddingTop: 14,
-                        borderTop: `1px solid ${m.role === "user" ? "rgba(255,255,255,0.2)" : "var(--color-border-tertiary)"}`,
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 8
+                      <details style={{
+                        marginTop: 14,
+                        paddingTop: 10,
+                        borderTop: `1px solid ${m.role === "user" ? "rgba(255,255,255,0.2)" : "var(--color-border-tertiary)"}`
                       }}>
-                        <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.5px", color: m.role === "user" ? "#ffffff" : "var(--color-text-secondary)", display: "flex", alignItems: "center", gap: 6 }}>
+                        <summary style={{
+                          fontSize: 11,
+                          fontWeight: 800,
+                          letterSpacing: "0.5px",
+                          cursor: "pointer",
+                          outline: "none",
+                          userSelect: "none",
+                          color: m.role === "user" ? "#ffffff" : "var(--color-text-secondary)",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6
+                        }}>
                           <svg style={{ width: 12, height: 12, color: m.role === "user" ? "#ffffff" : "var(--color-text-secondary)" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                             <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
                           </svg>
-                          CÁC CÔNG CỤ ĐÃ SỬ DỤNG:
-                        </span>
-                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          Chi tiết thực thi ({m.tools.length} tác vụ)
+                        </summary>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
                           {m.tools.map((tool, tIdx) => (
                             <div key={tIdx} style={{
                               fontSize: 12,
@@ -794,7 +871,7 @@ export function CopilotPage() {
                             </div>
                           ))}
                         </div>
-                      </div>
+                      </details>
                     )}
 
                     {/* Apply Price Card */}

@@ -12,7 +12,7 @@ HƯỚNG DẪN TẠO BÁO CÁO TẬP TRUNG BẰNG TIẾNG VIỆT:
 3. **Xử lý các trường trong JSON Schema:** 
    - Đối với bất kỳ trường thông tin nào (như `current_assessment`, `competitor_analysis`, `mathematical_basis`, `risk_factors`, `action_items`, v.v.) không liên quan trực tiếp đến câu hỏi của người dùng hoặc không có dữ liệu, hãy trả về giá trị rỗng `""` (hoặc mảng rỗng `[]`).
    - Ví dụ: Nếu người dùng chỉ hỏi về giá đối thủ, hãy tập trung phân tích đối thủ trong trường `executive_summary` / `competitor_analysis` và đề xuất giá mới. Các trường khác như `mathematical_basis` hay `risk_factors` hãy trả về rỗng `""`.
-4. **Đưa ra khuyến nghị cụ thể:** Nếu cần điều chỉnh giá, hãy đề xuất mức tăng hoặc giảm cụ thể bằng số tiền VND tuyệt đối (ví dụ: "Tăng 50,000 VND" hoặc "Giảm 120,000 VND") và tỷ lệ phần trăm tương ứng, kèm theo lý do ngắn gọn.
+4. **Đưa ra khuyến nghị cụ thể và có thể hành động được:** Nếu cần điều chỉnh giá, BẮT BUỘC nêu rõ: (a) áp dụng cho CHUYẾN BAY nào (số hiệu, ví dụ "VJ620, VJ622") hoặc nhóm chuyến nào; (b) HẠNG VÉ nào (Eco/Deluxe/SkyBoss); (c) số tiền VND tuyệt đối tăng/giảm (ví dụ: "Tăng 150,000 VND") và tỷ lệ phần trăm tương ứng; (d) lý do ngắn gọn. KHÔNG đưa ra khuyến nghị chung chung kiểu "đề xuất tăng giá 6%" mà không nói rõ chuyến và hạng vé. Nếu dữ liệu là tổng hợp nhiều chuyến, hãy đề xuất theo từng chuyến tiêu biểu (tham chiếu bảng dự báo đã có trong dữ liệu) hoặc nêu khoảng giá min–max cho từng hạng vé.
 
 LƯU Ý QUAN TRỌNG: Tất cả các nội dung mô tả, tóm tắt, đánh giá trong chuỗi JSON trả về PHẢI được viết bằng TIẾNG VIỆT 100%. Tuyệt đối không trả lời hoặc trích xuất mô tả bằng tiếng Anh.
 Trả lời bằng JSON theo đúng schema đã định nghĩa.

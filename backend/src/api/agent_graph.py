@@ -2105,6 +2105,23 @@ def route_after_tools(state: AgentState) -> str:
 
 # ── Helper Functions ──────────────────────────────────────────────────────────
 
+def _fmt_delta(new_price: float, base_price: float) -> str:
+    """Format an absolute + percentage price delta cell for markdown tables."""
+    try:
+        new_price = float(new_price or 0)
+        base_price = float(base_price or 0)
+    except (TypeError, ValueError):
+        return "—"
+    if base_price <= 0 or new_price <= 0:
+        return "—"
+    diff = new_price - base_price
+    pct = diff / base_price * 100.0
+    if abs(pct) < 0.05:
+        return "Giữ nguyên"
+    arrow = "▲ Tăng" if diff > 0 else "▼ Giảm"
+    return f"{arrow} {abs(diff):,.0f} VND ({pct:+.1f}%)"
+
+
 def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = None, price_comparison: dict | None = None, adjusted_prediction: dict | None = None, state: dict | None = None) -> str:
     """Convert structured JSON report to display-ready markdown dynamically based on query intent."""
     query_lower = state.get("user_query", "").lower() if state else ""
@@ -2144,22 +2161,37 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
             parts.append(f"\n#### Bảng so sánh giá vé đối thủ (Bamboo/Vietnam Airlines)")
             parts.append(price_comparison["comparison_table"])
 
-        # ML and price adjustments sections
+        # ML and price adjustments sections — comparison tables so the reader
+        # sees exactly which flight, which fare class, and how much
         if show_all or has_ml_intent:
             if adjusted_prediction and adjusted_prediction.get("predictions"):
-                parts.append(f"\n#### Dự báo giá vé đã điều chỉnh cạnh tranh (Price Adjustment Agent)")
-                for p in adjusted_prediction["predictions"][:5]:
-                    parts.append(f"- Chuyến bay **Vietjet {p['flight_no']}** ({p['route']}):")
-                    parts.append(f"  * Eco: {p['classes'].get('Eco', 0):,.0f} VND (Gốc ML: {p['original_classes'].get('Eco', 0):,.0f} VND) | Deluxe: {p['classes'].get('Deluxe', 0):,.0f} VND | SkyBoss: {p['classes'].get('SkyBoss', 0):,.0f} VND")
-                if len(adjusted_prediction["predictions"]) > 5:
-                    parts.append(f"*và dự báo đã điều chỉnh của {len(adjusted_prediction['predictions']) - 5} chuyến bay Vietjet khác...*")
+                parts.append(f"\n#### Đề xuất giá vé theo từng chuyến bay (đã điều chỉnh cạnh tranh)")
+                parts.append("| Chuyến bay | Giá hiện tại (VND) | Eco đề xuất (VND) | Thay đổi giá Eco | Deluxe (VND) | SkyBoss (VND) |")
+                parts.append("| :--- | ---: | ---: | :--- | ---: | ---: |")
+                preds = adjusted_prediction["predictions"]
+                for p in preds[:10]:
+                    cur = p.get("current_price") or 0
+                    eco = p["classes"].get("Eco", 0)
+                    parts.append(
+                        f"| **VJ{str(p['flight_no']).replace('VJ', '')}** | {cur:,.0f} | {eco:,.0f} | {_fmt_delta(eco, cur)} "
+                        f"| {p['classes'].get('Deluxe', 0):,.0f} | {p['classes'].get('SkyBoss', 0):,.0f} |"
+                    )
+                if len(preds) > 10:
+                    parts.append(f"*và {len(preds) - 10} chuyến bay Vietjet khác...*")
             elif ml_pred and ml_pred.get("predictions"):
-                parts.append(f"\n#### Dự báo giá vé từ mô hình Machine Learning (XGBoost/Ensemble)")
-                for pred in ml_pred["predictions"][:5]:
-                    parts.append(f"- Chuyến bay **Vietjet {pred['flight_no']}** ({pred['route']}):")
-                    parts.append(f"  * Eco: {pred['classes'].get('Eco', 0):,.0f} VND | Deluxe: {pred['classes'].get('Deluxe', 0):,.0f} VND | SkyBoss: {pred['classes'].get('SkyBoss', 0):,.0f} VND")
-                if len(ml_pred["predictions"]) > 5:
-                    parts.append(f"*và dự báo giá của {len(ml_pred['predictions']) - 5} chuyến bay Vietjet khác...*")
+                parts.append(f"\n#### Dự báo giá vé theo từng chuyến bay (mô hình Machine Learning)")
+                parts.append("| Chuyến bay | Giá hiện tại (VND) | Eco dự báo (VND) | Thay đổi giá Eco | Deluxe (VND) | SkyBoss (VND) |")
+                parts.append("| :--- | ---: | ---: | :--- | ---: | ---: |")
+                preds = ml_pred["predictions"]
+                for pred in preds[:10]:
+                    cur = pred.get("current_price") or 0
+                    eco = pred["classes"].get("Eco", 0)
+                    parts.append(
+                        f"| **VJ{str(pred['flight_no']).replace('VJ', '')}** | {cur:,.0f} | {eco:,.0f} | {_fmt_delta(eco, cur)} "
+                        f"| {pred['classes'].get('Deluxe', 0):,.0f} | {pred['classes'].get('SkyBoss', 0):,.0f} |"
+                    )
+                if len(preds) > 10:
+                    parts.append(f"*và {len(preds) - 10} chuyến bay Vietjet khác...*")
 
         if report and report.get("executive_summary"):
             parts.append(f"\n**Tóm tắt phân tích:** {report['executive_summary']}")
@@ -2171,19 +2203,31 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
 
     # Show prediction / adjustments if general query or prediction/competitor intent
     if show_all or has_ml_intent or has_comp_intent:
+        current_price = flight.get("price") or 0
+        current_class = flight.get("fare_family", "Eco")
+        # Delta vs current price is only meaningful for the same fare class
+        def _delta_for(cls: str, proposed: float) -> str:
+            return _fmt_delta(proposed, current_price) if cls == current_class else "—"
+
         if adjusted_prediction:
-            parts.append(f"\n#### Dự báo giá vé đã điều chỉnh cạnh tranh (Price Adjustment Agent)")
-            parts.append(f"- **Eco:** {adjusted_prediction.get('Eco', 0):,.0f} VND (Giá gốc ML: {ml_pred.get('Eco', 0):,.0f} VND)")
-            parts.append(f"- **Deluxe:** {adjusted_prediction.get('Deluxe', 0):,.0f} VND (Giá gốc ML: {ml_pred.get('Deluxe', 0):,.0f} VND)")
-            parts.append(f"- **SkyBoss:** {adjusted_prediction.get('SkyBoss', 0):,.0f} VND (Giá gốc ML: {ml_pred.get('SkyBoss', 0):,.0f} VND)")
+            parts.append(f"\n#### Đề xuất giá vé theo hạng (đã điều chỉnh cạnh tranh)")
+            parts.append(f"| Hạng vé | Giá đề xuất (VND) | Gốc dự báo ML (VND) | So với giá hiện tại ({current_class}) |")
+            parts.append("| :--- | ---: | ---: | :--- |")
+            for cls in ("Eco", "Deluxe", "SkyBoss"):
+                proposed = adjusted_prediction.get(cls, 0)
+                parts.append(
+                    f"| **{cls}** | {proposed:,.0f} | {(ml_pred or {}).get(cls, 0):,.0f} | {_delta_for(cls, proposed)} |"
+                )
             if adjusted_prediction.get('reason'):
-                parts.append(f"- **Lý do điều chỉnh:** {adjusted_prediction.get('reason')}")
+                parts.append(f"\n- **Lý do điều chỉnh:** {adjusted_prediction.get('reason')}")
         elif ml_pred:
-            parts.append(f"\n#### Dự báo từ mô hình Machine Learning")
-            parts.append(f"- **Eco:** {ml_pred.get('Eco', 0):,.0f} VND")
-            parts.append(f"- **Deluxe:** {ml_pred.get('Deluxe', 0):,.0f} VND")
-            parts.append(f"- **SkyBoss:** {ml_pred.get('SkyBoss', 0):,.0f} VND")
-            parts.append(f"- **GDS (Business):** {ml_pred.get('GDS', 0):,.0f} VND")
+            parts.append(f"\n#### Dự báo giá vé theo hạng (mô hình Machine Learning)")
+            parts.append(f"| Hạng vé | Giá dự báo (VND) | So với giá hiện tại ({current_class}) |")
+            parts.append("| :--- | ---: | :--- |")
+            for cls in ("Eco", "Deluxe", "SkyBoss", "GDS"):
+                if cls in ml_pred:
+                    label = "GDS (Business)" if cls == "GDS" else cls
+                    parts.append(f"| **{label}** | {ml_pred.get(cls, 0):,.0f} | {_delta_for(cls, ml_pred.get(cls, 0))} |")
 
     # Executive Summary (always show if available)
     if report.get("executive_summary"):
