@@ -21,6 +21,10 @@ import hashlib
 import logging
 import time
 from datetime import datetime, timedelta
+from backend.src.api.services.nvidia_retriever import (
+    get_embeddings_client,
+    get_embedding_dim,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,7 @@ SIMILARITY_THRESHOLD = float(os.getenv("CACHE_SIMILARITY_THRESHOLD", "0.92"))
 # NVIDIA NIM Embeddings Config
 NIM_EMBEDDING_URL = os.getenv("NIM_EMBEDDING_URL")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nvidia/embed-qa-4")
-EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "384"))
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 
 
 class SemanticCache:
@@ -59,32 +63,21 @@ class SemanticCache:
 
     def __init__(self):
         self.enabled = False
-        self.encoder = None
         self.client = None
 
         # Layer 1: In-memory exact match cache {hash: (response, timestamp)}
         self._exact_cache: dict[str, tuple[dict, float]] = {}
         self._max_exact_entries = 500
 
-        # Read NIM Configurations
-        self.nim_embedding_url = NIM_EMBEDDING_URL
-        self.embedding_model = EMBEDDING_MODEL
-        self.embedding_dim = EMBEDDING_DIM
-
         try:
             from qdrant_client import QdrantClient
             from qdrant_client.http import models as qdrant_models
 
+            self.embedding_dim = get_embedding_dim()
+            logger.info(f"Resolved embedding dimension for semantic cache: {self.embedding_dim}")
+
             self.client = QdrantClient(url=QDRANT_URL, timeout=3.0)
             self._qdrant_models = qdrant_models
-
-            # Load SentenceTransformer only if NIM embedding URL is not configured
-            if not self.nim_embedding_url:
-                from sentence_transformers import SentenceTransformer
-                self.encoder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-                logger.info(f"Local SentenceTransformer loaded for semantic cache (dim={self.embedding_dim})")
-            else:
-                logger.info(f"NIM Embeddings enabled at {self.nim_embedding_url} (model={self.embedding_model}, dim={self.embedding_dim})")
 
             # Initialize Qdrant collection for cache
             self._init_collection()
@@ -94,9 +87,22 @@ class SemanticCache:
             logger.warning(f"Semantic cache disabled ({e}). LLM calls will not be cached.")
 
     def _init_collection(self):
-        """Create Qdrant collection for cache if not exists."""
+        """Create Qdrant collection for cache if not exists, recreating on dimension changes."""
         try:
             collections = [c.name for c in self.client.get_collections().collections]
+            
+            if CACHE_COLLECTION in collections:
+                # Check current collection dimension
+                info = self.client.get_collection(CACHE_COLLECTION)
+                current_dim = info.config.params.vectors.size
+                if current_dim != self.embedding_dim:
+                    logger.warning(
+                        f"Cache collection '{CACHE_COLLECTION}' has dim={current_dim}, "
+                        f"but expected {self.embedding_dim}. Recreating..."
+                    )
+                    self.client.delete_collection(CACHE_COLLECTION)
+                    collections.remove(CACHE_COLLECTION)
+
             if CACHE_COLLECTION not in collections:
                 self.client.create_collection(
                     collection_name=CACHE_COLLECTION,
@@ -105,7 +111,7 @@ class SemanticCache:
                         distance=self._qdrant_models.Distance.COSINE
                     )
                 )
-                logger.info(f"Created Qdrant cache collection '{CACHE_COLLECTION}'")
+                logger.info(f"Created Qdrant cache collection '{CACHE_COLLECTION}' with dim={self.embedding_dim}")
         except Exception as e:
             logger.error(f"Failed to create cache collection: {e}")
             self.enabled = False
@@ -193,34 +199,9 @@ class SemanticCache:
         return age_hours < CACHE_TTL_HOURS
 
     def _get_embedding(self, text: str) -> list[float]:
-        """Generate embedding vector using NVIDIA NIM or fallback to local SentenceTransformer."""
-        if self.nim_embedding_url or os.getenv("NVIDIA_API_KEY"):
-            try:
-                from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
-                api_key = os.getenv("NVIDIA_API_KEY") or os.getenv("VLLM_API_KEY")
-                
-                kwargs = {"model": self.embedding_model}
-                if api_key:
-                    kwargs["nvidia_api_key"] = api_key
-                if self.nim_embedding_url:
-                    kwargs["base_url"] = self.nim_embedding_url.rstrip('/')
-                
-                embeddings_client = NVIDIAEmbeddings(**kwargs)
-                return embeddings_client.embed_query(text)
-            except Exception as e:
-                logger.warning(f"Failed to fetch embedding from NVIDIA NIM: {e}. Falling back to local SentenceTransformer.")
-        
-        # Load local encoder on demand if not already loaded
-        if self.encoder is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-                logger.info("Loading SentenceTransformer dynamically as fallback...")
-                self.encoder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-            except Exception as ex:
-                logger.error(f"Failed to load fallback SentenceTransformer: {ex}")
-                raise ValueError(f"No embedding model is available. Fallback failed: {ex}")
-
-        return self.encoder.encode(text).tolist()
+        """Generate embedding vector using centralized shared retriever client."""
+        client = get_embeddings_client()
+        return client.embed_query(text)
 
     def get(self, query: str, route: str = None) -> dict | None:
         """

@@ -13,6 +13,11 @@ import os
 import logging
 import re
 from qdrant_client import QdrantClient
+from backend.src.api.services.nvidia_retriever import (
+    get_embeddings_client,
+    get_reranker_client,
+    get_embedding_dim,
+)
 from qdrant_client.http import models as qdrant_models
 
 logger = logging.getLogger(__name__)
@@ -23,7 +28,7 @@ COLLECTION_NAME = "market_intelligence"
 # NVIDIA NIM Configs
 NIM_EMBEDDING_URL = os.getenv("NIM_EMBEDDING_URL")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nvidia/embed-qa-4")
-EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "384"))
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 
 NIM_RERANK_URL = os.getenv("NIM_RERANK_URL")
 RERANK_MODEL = os.getenv("RERANK_MODEL", "nvidia/reranking-nv-embed-qa-4")
@@ -90,36 +95,11 @@ class QdrantRAGService:
         self._initialized = True
         
         self.enabled = False
-        self.encoder = None
-        self.reranker = None
         self.client = None
-
-        # Read NIM Configurations
-        self.nim_embedding_url = NIM_EMBEDDING_URL
-        self.embedding_model = EMBEDDING_MODEL
-        self.embedding_dim = EMBEDDING_DIM
-        self.nim_rerank_url = NIM_RERANK_URL
-        self.rerank_model = RERANK_MODEL
         
         try:
-            # Load SentenceTransformer only if NIM embedding URL is not configured
-            if not self.nim_embedding_url:
-                from sentence_transformers import SentenceTransformer
-                self.encoder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-                logger.info(f"Local SentenceTransformer loaded for RAG (dim={self.embedding_dim})")
-            else:
-                logger.info(f"NIM Embeddings enabled for RAG at {self.nim_embedding_url} (model={self.embedding_model}, dim={self.embedding_dim})")
-            
-            # Load CrossEncoder only if NIM re-ranking URL is not configured
-            if not self.nim_rerank_url:
-                try:
-                    from sentence_transformers import CrossEncoder
-                    self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-                    logger.info("Local Cross-encoder re-ranker loaded for RAG.")
-                except Exception as e:
-                    logger.warning(f"Local Cross-encoder not available ({e}). Skipping local re-ranking.")
-            else:
-                logger.info(f"NIM Re-ranking enabled for RAG at {self.nim_rerank_url} (model={self.rerank_model})")
+            self.embedding_dim = get_embedding_dim()
+            logger.info(f"Resolved embedding dimension for RAG: {self.embedding_dim}")
             
             self.client = QdrantClient(url=QDRANT_URL, timeout=3.0)
             self.enabled = True
@@ -128,7 +108,7 @@ class QdrantRAGService:
             self._init_collection()
             logger.info("Qdrant RAG Service initialized successfully.")
         except Exception as e:
-            logger.warning(f"Could not initialize Qdrant client or encoder ({e}). Running in fallback mode.")
+            logger.warning(f"Could not initialize Qdrant client or retriever ({e}). Running in fallback mode.")
             self.enabled = False
 
     def _init_collection(self):
@@ -136,8 +116,21 @@ class QdrantRAGService:
             return
         try:
             collections = [c.name for c in self.client.get_collections().collections]
+            
+            if COLLECTION_NAME in collections:
+                # Check current collection dimension
+                info = self.client.get_collection(COLLECTION_NAME)
+                current_dim = info.config.params.vectors.size
+                if current_dim != self.embedding_dim:
+                    logger.warning(
+                        f"Collection '{COLLECTION_NAME}' has dim={current_dim}, "
+                        f"but expected {self.embedding_dim}. Recreating..."
+                    )
+                    self.client.delete_collection(COLLECTION_NAME)
+                    collections.remove(COLLECTION_NAME)
+
             if COLLECTION_NAME not in collections:
-                logger.info(f"Creating collection '{COLLECTION_NAME}' in Qdrant Vector DB...")
+                logger.info(f"Creating collection '{COLLECTION_NAME}' in Qdrant Vector DB with dim={self.embedding_dim}...")
                 self.client.create_collection(
                     collection_name=COLLECTION_NAME,
                     vectors_config=qdrant_models.VectorParams(
@@ -261,34 +254,9 @@ class QdrantRAGService:
             return {"status": "error", "message": str(e)}
 
     def _get_embedding(self, text: str) -> list[float]:
-        """Generate embedding vector using NVIDIA NIM or fallback to local SentenceTransformer."""
-        if self.nim_embedding_url or os.getenv("NVIDIA_API_KEY"):
-            try:
-                from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
-                api_key = os.getenv("NVIDIA_API_KEY") or os.getenv("VLLM_API_KEY")
-                
-                kwargs = {"model": self.embedding_model}
-                if api_key:
-                    kwargs["nvidia_api_key"] = api_key
-                if self.nim_embedding_url:
-                    kwargs["base_url"] = self.nim_embedding_url.rstrip('/')
-                
-                embeddings_client = NVIDIAEmbeddings(**kwargs)
-                return embeddings_client.embed_query(text)
-            except Exception as e:
-                logger.warning(f"Failed to fetch embedding from NVIDIA NIM: {e}. Falling back to local SentenceTransformer.")
-        
-        # Load local encoder on demand if not already loaded
-        if self.encoder is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-                logger.info("Loading SentenceTransformer dynamically as RAG fallback...")
-                self.encoder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-            except Exception as ex:
-                logger.error(f"Failed to load fallback SentenceTransformer for RAG: {ex}")
-                raise ValueError(f"No embedding model is available. Fallback failed: {ex}")
-
-        return self.encoder.encode(text).tolist()
+        """Generate embedding vector using centralized shared retriever client."""
+        client = get_embeddings_client()
+        return client.embed_query(text)
 
     def _keyword_score(self, query: str, text: str) -> float:
         """Simple BM25-like keyword scoring for hybrid search."""
@@ -310,99 +278,55 @@ class QdrantRAGService:
         return score / len(query_terms)
 
     def _rerank(self, query: str, results: list, top_k: int = 3) -> list:
-        """Re-rank results using cross-encoder for improved precision."""
+        """Re-rank results using shared reranker client (LangChain compressor interface)."""
         if not results:
             return []
-            
-        if self.nim_rerank_url:
-            import httpx
-            try:
-                headers = {"Content-Type": "application/json"}
-                api_key = os.getenv("VLLM_API_KEY") or os.getenv("NVIDIA_API_KEY")
-                if api_key:
-                    headers["Authorization"] = f"Bearer {api_key}"
-                
-                passages = [{"text": r.payload.get("text", "")} for r in results]
-                payload = {
-                    "model": self.rerank_model,
-                    "query": {"text": query},
-                    "passages": passages
-                }
-                
-                with httpx.Client(timeout=5.0) as client:
-                    # NVIDIA NIM standard ranking endpoint is POST /v1/ranking
-                    resp = client.post(
-                        f"{self.nim_rerank_url.rstrip('/')}/ranking",
-                        json=payload,
-                        headers=headers
-                    )
-                    
-                    if resp.status_code == 200:
-                        ranking_data = resp.json()
-                        rankings = ranking_data.get("rankings", [])
-                        
-                        scored = []
-                        for item in rankings:
-                            idx = item["index"]
-                            score = item.get("score") or item.get("logit") or 0.0
-                            if idx < len(results):
-                                combined = 0.7 * float(score) + 0.3 * float(results[idx].score)
-                                scored.append((results[idx], combined))
-                                
-                        if scored:
-                            scored.sort(key=lambda x: -x[1])
-                            return [r for r, s in scored[:top_k]]
-                    else:
-                        # Fallback try /reranking or /v1/ranking depending on endpoint path
-                        resp2 = client.post(
-                            f"{self.nim_rerank_url.rstrip('/')}/reranking",
-                            json=payload,
-                            headers=headers
-                        )
-                        if resp2.status_code == 200:
-                            ranking_data = resp2.json()
-                            rankings = ranking_data.get("rankings", [])
-                            scored = []
-                            for item in rankings:
-                                idx = item["index"]
-                                score = item.get("score") or item.get("logit") or 0.0
-                                if idx < len(results):
-                                    combined = 0.7 * float(score) + 0.3 * float(results[idx].score)
-                                    scored.append((results[idx], combined))
-                            if scored:
-                                scored.sort(key=lambda x: -x[1])
-                                return [r for r, s in scored[:top_k]]
-                        
-                        logger.warning(f"NIM Reranking API returned status {resp.status_code}. Falling back to local CrossEncoder.")
-            except Exception as e:
-                logger.warning(f"Failed to fetch rankings from NVIDIA NIM: {e}. Falling back to local CrossEncoder.")
 
-        # Fallback to local CrossEncoder
-        if self.reranker is None:
-            try:
-                from sentence_transformers import CrossEncoder
-                logger.info("Loading CrossEncoder dynamically as RAG fallback...")
-                self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-            except Exception as ex:
-                logger.error(f"Failed to load fallback CrossEncoder: {ex}")
+        reranker = get_reranker_client()
+        if reranker is None:
+            return results[:top_k]
 
-        if self.reranker:
-            try:
-                pairs = [(query, r.payload["text"]) for r in results]
-                scores = self.reranker.predict(pairs)
-                
-                # Combine with original cosine score (0.7 reranker + 0.3 original)
-                scored = []
-                for i, (result, rerank_score) in enumerate(zip(results, scores)):
-                    combined = 0.7 * float(rerank_score) + 0.3 * float(result.score)
-                    scored.append((result, combined))
-                
+        try:
+            from langchain_core.documents import Document
+
+            # Convert Qdrant results to LangChain Documents, keeping index in metadata
+            docs = [
+                Document(
+                    page_content=r.payload.get("text", ""),
+                    metadata={
+                        "index": i,
+                        "original_score": float(r.score)
+                    }
+                )
+                for i, r in enumerate(results)
+            ]
+
+            # Compress documents using the shared client
+            compressed_docs = reranker.compress_documents(docs, query)
+
+            # Re-score and sort based on relevance_score in metadata
+            scored = []
+            for doc in compressed_docs:
+                idx = doc.metadata.get("index")
+                rerank_score = doc.metadata.get("relevance_score", 0.0)
+                if idx is not None and idx < len(results):
+                    combined = 0.7 * float(rerank_score) + 0.3 * float(doc.metadata["original_score"])
+                    scored.append((results[idx], combined))
+
+            if scored:
                 scored.sort(key=lambda x: -x[1])
                 return [r for r, s in scored[:top_k]]
-            except Exception as e:
-                logger.warning(f"Local Re-ranking failed ({e}), using original order")
-                
-        return results[:top_k]
+            else:
+                # Fallback to order returned by compressor if relevance_score not set
+                mapped = []
+                for doc in compressed_docs:
+                    idx = doc.metadata.get("index")
+                    if idx is not None and idx < len(results):
+                        mapped.append(results[idx])
+                return mapped[:top_k]
+        except Exception as e:
+            logger.warning(f"Re-ranking failed ({e}), using original order")
+            return results[:top_k]
 
     def query_market_context(self, query_text: str, route_filter: str = None, limit: int = 3) -> str:
         """
@@ -417,7 +341,7 @@ class QdrantRAGService:
         Falls back gracefully: Qdrant → keyword match → static data.
         """
         # --- Fallback Mode: Local Regex/String Matches ---
-        if not self.enabled or self.client is None or (self.encoder is None and not self.nim_embedding_url):
+        if not self.enabled or self.client is None:
             logger.warning("RAG running in fallback string-matching mode.")
             return self._fallback_search(query_text, route_filter, limit)
 
