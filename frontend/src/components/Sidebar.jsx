@@ -1,4 +1,5 @@
 import { NavLink, useLocation } from "react-router-dom";
+import { useIsMobile } from "../hooks/useIsMobile";
 import {
   IconChartPie,
   IconOverview,
@@ -22,6 +23,57 @@ const NAV = [
 
 export function Sidebar() {
   const location = useLocation();
+  const isMobile = useIsMobile();
+
+  // Mobile: bottom navigation bar thay cho rail dọc bên trái
+  if (isMobile) {
+    return (
+      <div
+        className="glass-panel"
+        style={{
+          position: "fixed",
+          bottom: 0,
+          left: 0,
+          right: 0,
+          height: 58,
+          display: "flex",
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-around",
+          padding: "0 6px",
+          paddingBottom: "env(safe-area-inset-bottom)",
+          borderRadius: "18px 18px 0 0",
+          boxShadow: "0 -6px 24px rgba(0, 0, 0, 0.07)",
+          zIndex: 500,
+        }}
+      >
+        {NAV.map(n => {
+          const isActive = n.to === "/" ? location.pathname === "/" : location.pathname.startsWith(n.to);
+          return (
+            <NavLink
+              key={n.to}
+              to={n.to}
+              title={n.label}
+              className={isActive ? "nav-active-drop" : ""}
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: "var(--border-radius-md)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                textDecoration: "none",
+                color: isActive ? "var(--color-text-info)" : "var(--color-text-secondary)",
+              }}
+            >
+              <n.Icon size={18} />
+            </NavLink>
+          );
+        })}
+      </div>
+    );
+  }
+
   return (
     <div 
       className="glass-panel"

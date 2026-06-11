@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useApi, API } from "../hooks/useApi";
+import { useIsMobile } from "../hooks/useIsMobile";
 
 export function CopilotPage() {
   const INITIAL_GREETING = [
@@ -22,6 +23,9 @@ export function CopilotPage() {
   const [toast, setToast] = useState(null);
   const [reasoningEnabled, setReasoningEnabled] = useState(true);
   const [isFocused, setIsFocused] = useState(false);
+  const isMobile = useIsMobile();
+  // Mobile: sidebar lịch sử hội thoại trở thành drawer trượt, mặc định đóng
+  const [historyOpen, setHistoryOpen] = useState(false);
   const messagesEndRef = useRef(null);
 
   const getGreeting = () => {
@@ -81,6 +85,7 @@ export function CopilotPage() {
 
   const handleSelectSession = async (sessionId) => {
     setCurrentSessionId(sessionId);
+    setHistoryOpen(false);
     setLoading(true);
     try {
       const response = await fetch(`${API}/agent/sessions/${sessionId}/messages`);
@@ -110,6 +115,7 @@ export function CopilotPage() {
   const handleNewChat = () => {
     setCurrentSessionId(null);
     setMessages(INITIAL_GREETING);
+    setHistoryOpen(false);
   };
 
   const handleDeleteSession = async (e, sessionId) => {
@@ -272,22 +278,75 @@ export function CopilotPage() {
     "Kiểm tra tác động bối cảnh thị trường chặng bay DAD"
   ];
 
+  // Nút mở danh sách hội thoại (chỉ hiện trên mobile)
+  const historyToggleButton = (
+    <button
+      onClick={() => setHistoryOpen(true)}
+      aria-label="Mở lịch sử hội thoại"
+      style={{
+        background: "rgba(255,255,255,0.9)",
+        border: "1px solid var(--color-border-secondary)",
+        borderRadius: 10,
+        width: 38,
+        height: 38,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        cursor: "pointer",
+        color: "var(--color-text-primary)",
+        flexShrink: 0,
+        boxShadow: "0 2px 8px rgba(0,0,0,0.04)"
+      }}
+    >
+      <svg style={{ width: 18, height: 18 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <line x1="3" y1="6" x2="21" y2="6" />
+        <line x1="3" y1="12" x2="21" y2="12" />
+        <line x1="3" y1="18" x2="15" y2="18" />
+      </svg>
+    </button>
+  );
+
   return (
     <div style={{
       display: "flex",
       height: "100%",
       width: "100%",
-      background: "transparent"
+      background: "transparent",
+      position: "relative",
+      overflow: "hidden"
     }}>
-      {/* SIDEBAR: Chat History List */}
+      {/* Backdrop khi mở drawer trên mobile */}
+      {isMobile && historyOpen && (
+        <div
+          onClick={() => setHistoryOpen(false)}
+          style={{
+            position: "absolute",
+            inset: 0,
+            background: "rgba(0,0,0,0.35)",
+            zIndex: 300
+          }}
+        />
+      )}
+
+      {/* SIDEBAR: Chat History List — mobile: drawer trượt từ trái */}
       <div className="glass-panel" style={{
-        width: 280,
+        width: isMobile ? "min(280px, 82vw)" : 280,
         display: "flex",
         flexDirection: "column",
         flexShrink: 0,
-        borderRadius: 0,
+        borderRadius: isMobile ? "0 16px 16px 0" : 0,
         border: "none",
-        borderRight: "1px solid var(--color-border-tertiary) !important"
+        borderRight: "1px solid var(--color-border-tertiary) !important",
+        ...(isMobile ? {
+          position: "absolute",
+          top: 0,
+          bottom: 0,
+          left: 0,
+          zIndex: 301,
+          transform: historyOpen ? "translateX(0)" : "translateX(-105%)",
+          transition: "transform 0.28s cubic-bezier(0.16, 1, 0.3, 1)",
+          boxShadow: historyOpen ? "0 10px 40px rgba(0,0,0,0.18)" : "none"
+        } : {})
       }}>
         {/* New Chat Button */}
         <div style={{ padding: "16px", borderBottom: "1px solid var(--color-border-tertiary)" }}>
@@ -408,15 +467,22 @@ export function CopilotPage() {
             flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
-            padding: "40px 20px",
+            padding: isMobile ? "24px 16px" : "40px 20px",
             background: "radial-gradient(circle at 50% 50%, rgba(229, 75, 75, 0.06) 0%, rgba(255, 255, 255, 0) 70%)",
             position: "relative"
           }}>
+            {/* Nút mở lịch sử hội thoại (mobile) */}
+            {isMobile && (
+              <div style={{ position: "absolute", top: 12, left: 12 }}>
+                {historyToggleButton}
+              </div>
+            )}
+
             {/* Model & Connection Badge Floating Top-Right */}
             <div style={{
               position: "absolute",
-              top: 20,
-              right: 24,
+              top: isMobile ? 12 : 20,
+              right: isMobile ? 12 : 24,
               display: "flex",
               alignItems: "center",
               gap: 8
@@ -446,11 +512,11 @@ export function CopilotPage() {
 
             {/* Centered Greeting */}
             <h1 style={{
-              fontSize: 34,
+              fontSize: isMobile ? 23 : 34,
               fontWeight: 300,
               color: "#1f1f1f",
               textAlign: "center",
-              marginBottom: 36,
+              marginBottom: isMobile ? 24 : 36,
               fontFamily: "var(--font-sans)",
               letterSpacing: "-0.5px"
             }}>
@@ -466,7 +532,7 @@ export function CopilotPage() {
               alignItems: "center",
               background: "#ffffff",
               border: isFocused ? "1.5px solid rgba(229, 75, 75, 0.25)" : "1.5px solid rgba(0, 0, 0, 0.05)",
-              padding: "0 12px 0 24px",
+              padding: isMobile ? "0 8px 0 16px" : "0 12px 0 24px",
               borderRadius: 28,
               boxShadow: isFocused 
                 ? "0 12px 40px rgba(229, 75, 75, 0.08), 0 0 0 3px rgba(229, 75, 75, 0.06)" 
@@ -560,7 +626,9 @@ export function CopilotPage() {
                     display: "flex",
                     alignItems: "center",
                     gap: 6,
-                    border: "1px solid rgba(0, 0, 0, 0.04)"
+                    border: "1px solid rgba(0, 0, 0, 0.04)",
+                    maxWidth: "100%",
+                    textAlign: "left"
                   }}
                   onMouseOver={e => {
                     e.currentTarget.style.borderColor = "rgba(229, 75, 75, 0.15)";
@@ -585,17 +653,19 @@ export function CopilotPage() {
           <>
             {/* Top Header */}
             <div style={{
-              padding: "16px 24px",
+              padding: isMobile ? "10px 12px" : "16px 24px",
               background: "rgba(255, 255, 255, 0.45)",
               backdropFilter: "blur(12px)",
               borderBottom: "1px solid var(--color-border-tertiary)",
               display: "flex",
               justifyContent: "space-between",
               alignItems: "center",
+              gap: 10,
               flexShrink: 0
             }}>
-              <div>
-                <h1 style={{ fontSize: 18, fontWeight: 800, color: "var(--color-text-primary)", margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+              {isMobile && historyToggleButton}
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <h1 style={{ fontSize: isMobile ? 15 : 18, fontWeight: 800, color: "var(--color-text-primary)", margin: 0, display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                   <span style={{ display: "inline-flex", alignItems: "center" }}>
                     <svg style={{ width: 20, height: 20, color: "var(--color-text-info)" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
@@ -605,22 +675,24 @@ export function CopilotPage() {
                   </span>
                   AI Revenue Copilot
                 </h1>
-                <p style={{ fontSize: 12, color: "var(--color-text-secondary)", margin: "4px 0 0 0" }}>
-                  Trợ lý đàm thoại thông minh hỗ trợ phân tích định giá thời gian thực
-                </p>
+                {!isMobile && (
+                  <p style={{ fontSize: 12, color: "var(--color-text-secondary)", margin: "4px 0 0 0" }}>
+                    Trợ lý đàm thoại thông minh hỗ trợ phân tích định giá thời gian thực
+                  </p>
+                )}
               </div>
 
               {/* Status Indicator */}
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
                 <div style={{
                   display: "flex",
                   alignItems: "center",
                   gap: 6,
                   background: statusData.vllm_connected ? "var(--color-background-success)" : "var(--color-background-danger)",
                   border: `1px solid ${statusData.vllm_connected ? "var(--color-border-success)" : "var(--color-border-danger)"}`,
-                  padding: "6px 12px",
+                  padding: isMobile ? "5px 9px" : "6px 12px",
                   borderRadius: 20,
-                  fontSize: 12,
+                  fontSize: isMobile ? 10 : 12,
                   fontWeight: 700,
                   color: statusData.vllm_connected ? "var(--color-text-success)" : "var(--color-text-danger)"
                 }}>
@@ -631,20 +703,22 @@ export function CopilotPage() {
                     backgroundColor: statusData.vllm_connected ? "#059669" : "#be123c",
                     display: "inline-block"
                   }} />
-                  <span>vLLM: {statusData.vllm_connected ? "Connected" : "Offline"}</span>
+                  <span>{isMobile ? (statusData.vllm_connected ? "Online" : "Offline") : `vLLM: ${statusData.vllm_connected ? "Connected" : "Offline"}`}</span>
                 </div>
 
-                <div style={{
-                  fontSize: 11,
-                  color: "var(--color-text-secondary)",
-                  background: "var(--color-background-tertiary)",
-                  padding: "6px 12px",
-                  borderRadius: 20,
-                  border: "1px solid var(--color-border-tertiary)",
-                  fontWeight: 600
-                }}>
-                  Model: <span style={{ fontFamily: "monospace", color: "var(--color-text-primary)" }}>{statusData.vllm_model.split("/").pop()}</span>
-                </div>
+                {!isMobile && (
+                  <div style={{
+                    fontSize: 11,
+                    color: "var(--color-text-secondary)",
+                    background: "var(--color-background-tertiary)",
+                    padding: "6px 12px",
+                    borderRadius: 20,
+                    border: "1px solid var(--color-border-tertiary)",
+                    fontWeight: 600
+                  }}>
+                    Model: <span style={{ fontFamily: "monospace", color: "var(--color-text-primary)" }}>{statusData.vllm_model.split("/").pop()}</span>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -652,17 +726,18 @@ export function CopilotPage() {
             <div style={{
               flex: 1,
               overflowY: "auto",
-              padding: "24px",
+              padding: isMobile ? "14px 12px" : "24px",
               display: "flex",
               flexDirection: "column",
-              gap: 20
+              gap: isMobile ? 14 : 20,
+              WebkitOverflowScrolling: "touch"
             }}>
               {messages.map((m, idx) => (
                 <div key={idx} style={{
                   display: "flex",
                   flexDirection: "column",
                   alignItems: m.role === "user" ? "flex-end" : "flex-start",
-                  maxWidth: "85%",
+                  maxWidth: isMobile ? "94%" : "85%",
                   alignSelf: m.role === "user" ? "flex-end" : "flex-start"
                 }}>
                   {/* Sender Label */}
@@ -682,7 +757,7 @@ export function CopilotPage() {
                     style={{
                       background: m.role === "user" ? "linear-gradient(135deg, #e54b4b, #c53030)" : "var(--color-background-primary)",
                       color: m.role === "user" ? "#ffffff" : "var(--color-text-primary)",
-                      padding: "16px 20px",
+                      padding: isMobile ? "12px 14px" : "16px 20px",
                       borderRadius: 16,
                       boxShadow: m.role === "user" ? "0 4px 12px rgba(229,75,75,0.12)" : "0 4px 12px rgba(0,0,0,0.02)",
                       border: m.role === "user" ? "none" : "1px solid rgba(255,255,255,0.6)",
@@ -883,9 +958,10 @@ export function CopilotPage() {
                         border: m.role === "user" ? "1px solid rgba(255,255,255,0.3)" : "1px solid var(--color-border-info)",
                         borderRadius: 12,
                         display: "flex",
+                        flexWrap: "wrap",
                         justifyContent: "space-between",
                         alignItems: "center",
-                        gap: 16
+                        gap: isMobile ? 10 : 16
                       }}>
                         <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                           <span style={{ fontSize: 10, fontWeight: 800, opacity: 0.8 }}>HÀNH ĐỘNG KHUYẾN NGHỊ</span>
@@ -927,7 +1003,7 @@ export function CopilotPage() {
               ))}
 
               {loading && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: "60%" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: isMobile ? "92%" : "60%" }}>
                   <span style={{ fontSize: 11, fontWeight: 700, color: "var(--color-text-secondary)", padding: "0 4px" }}>
                     VJ REVENUE COPILOT ĐANG SUY NGHĨ...
                   </span>
@@ -961,7 +1037,7 @@ export function CopilotPage() {
 
             {/* Input Bar */}
             <div style={{
-              padding: "16px 24px 24px 24px",
+              padding: isMobile ? "10px 12px 14px 12px" : "16px 24px 24px 24px",
               background: "transparent",
               display: "flex",
               justifyContent: "center",
@@ -972,12 +1048,12 @@ export function CopilotPage() {
               <div style={{
                 width: "100%",
                 maxWidth: 720,
-                height: 52,
+                height: isMobile ? 48 : 52,
                 display: "flex",
                 alignItems: "center",
                 background: "#ffffff",
                 border: isFocused ? "1.5px solid rgba(229, 75, 75, 0.25)" : "1.5px solid rgba(0, 0, 0, 0.05)",
-                padding: "0 12px 0 20px",
+                padding: isMobile ? "0 8px 0 16px" : "0 12px 0 20px",
                 borderRadius: 26,
                 boxShadow: isFocused 
                   ? "0 12px 40px rgba(229, 75, 75, 0.08), 0 0 0 3px rgba(229, 75, 75, 0.06)" 
@@ -996,10 +1072,11 @@ export function CopilotPage() {
                   onBlur={() => setIsFocused(false)}
                   style={{
                     flex: 1,
+                    minWidth: 0,
                     border: "none",
                     outline: "none",
                     background: "transparent",
-                    fontSize: 15,
+                    fontSize: 16, /* >=16px để iOS không tự zoom khi focus */
                     color: "#1f1f1f",
                     height: "100%",
                     fontFamily: "var(--font-sans)"
@@ -1055,8 +1132,9 @@ export function CopilotPage() {
       {toast && (
         <div style={{
           position: "fixed",
-          top: 24,
-          right: 24,
+          top: isMobile ? 12 : 24,
+          right: isMobile ? 12 : 24,
+          left: isMobile ? 12 : "auto",
           zIndex: 9999,
           background: toast.type === "success" ? "var(--color-background-success)" : "var(--color-background-danger)",
           color: toast.type === "success" ? "var(--color-text-success)" : "var(--color-text-danger)",

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Routes, Route, useNavigate } from "react-router-dom";
 import { useApi } from "./hooks/useApi";
+import { useIsMobile } from "./hooks/useIsMobile";
 import { Sidebar } from "./components/Sidebar";
 import { OverviewPage } from "./pages/OverviewPage";
 import { OptimizerPage } from "./pages/OptimizerPage";
@@ -15,6 +16,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 
 export default function App() {
   const navigate = useNavigate();
+  const isMobile = useIsMobile();
   const [selectedFlight, setFlight] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const { data: health }          = useApi("/health");
@@ -42,8 +44,8 @@ export default function App() {
         <div className="fluid-blob fluid-blob-3" />
       </div>
 
-      <div style={{
-        display: "flex", height: "100vh",
+      <div className="app-shell" style={{
+        display: "flex",
         background: "transparent",
         fontFamily: "var(--font-sans)", overflow: "hidden",
         position: "relative",
@@ -54,12 +56,15 @@ export default function App() {
           {/* Floating Dynamic Island (Web Header Redesign) */}
           <div className="dynamic-island" style={{
             position: "absolute",
-            top: 12,
+            top: isMobile ? 8 : 12,
             left: "50%",
             transform: "translateX(-50%)",
-            height: 48,
+            height: isMobile ? 42 : 48,
             display: "flex", alignItems: "center",
-            padding: "0 24px", gap: 16, flexShrink: 0,
+            padding: isMobile ? "0 14px" : "0 24px",
+            gap: isMobile ? 8 : 16, flexShrink: 0,
+            maxWidth: "calc(100vw - 16px)",
+            overflow: "hidden",
             zIndex: 100,
           }}>
             {/* Logo Area */}
@@ -74,10 +79,10 @@ export default function App() {
               </div>
             </div>
 
-            <div style={{ width: 1, height: 20, background: "var(--color-border-tertiary)" }} />
+            {!isMobile && <div style={{ width: 1, height: 20, background: "var(--color-border-tertiary)" }} />}
 
-            {/* Model Status Badges */}
-            {bestModel && (
+            {/* Model Status Badges — ẩn trên mobile để không tràn ngang */}
+            {!isMobile && bestModel && (
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 {/* Best Model Name */}
                 <div style={{
@@ -140,8 +145,8 @@ export default function App() {
             </div>
           </div>
 
-          {/* Page content */}
-          <div style={{ flex: 1, overflow: "hidden", display: "flex", paddingTop: 76 }}>
+          {/* Page content — mobile: chừa chỗ cho island gọn hơn ở trên và bottom nav ở dưới */}
+          <div style={{ flex: 1, overflow: "hidden", display: "flex", paddingTop: isMobile ? 58 : 76, paddingBottom: isMobile ? 58 : 0 }}>
             <Routes>
               <Route path="/" element={<DashboardPage />} />
               <Route path="/overview" element={<OverviewPage onSelectFlight={handleSelectFlight} key={refreshKey} />} />
