@@ -305,24 +305,26 @@ Viết báo cáo chuyên nghiệp, mạch lạc, trực quan, có định dạng
                     headers=headers
                 )
             
-                choice = res_data["choices"][0]["message"]
-                content = choice.get("content") or ""
-                
-                # Check for reasoning_content (DeepSeek-R1 API returns this field)
-                reasoning = choice.get("reasoning_content", "")
-                
-                # If reasoning not in separate field, extract from <think> tags if present
-                if not reasoning and "<think>" in content:
-                    parts = content.split("</think>")
-                    reasoning = parts[0].replace("<think>", "").strip()
-                    content = parts[1].strip()
-                
-                thinking = reasoning if reasoning else "Agent đã hoàn thành suy luận logic chuỗi hành động dựa trên dữ liệu đầu vào."
-                message = content
-            else:
-                logger.error(f"vLLM response error: {response.status_code} - {response.text}")
-                message = self._fallback_local_report(flight_info, opt_res, comp_prices)
-                thinking = "Dịch vụ vLLM trả về mã lỗi. Sử dụng công cụ báo cáo dự phòng nội bộ."
+                if response.status_code == 200:
+                    res_data = response.json()
+                    choice = res_data["choices"][0]["message"]
+                    content = choice.get("content") or ""
+                    
+                    # Check for reasoning_content (DeepSeek-R1 API returns this field)
+                    reasoning = choice.get("reasoning_content", "")
+                    
+                    # If reasoning not in separate field, extract from <think> tags if present
+                    if not reasoning and "<think>" in content:
+                        parts = content.split("</think>")
+                        reasoning = parts[0].replace("<think>", "").strip()
+                        content = parts[1].strip()
+                    
+                    thinking = reasoning if reasoning else "Agent đã hoàn thành suy luận logic chuỗi hành động dựa trên dữ liệu đầu vào."
+                    message = content
+                else:
+                    logger.error(f"vLLM response error: {response.status_code} - {response.text}")
+                    message = self._fallback_local_report(flight_info, opt_res, comp_prices)
+                    thinking = "Dịch vụ vLLM trả về mã lỗi. Sử dụng công cụ báo cáo dự phòng nội bộ."
         except Exception as ex:
             logger.error(f"Failed to connect to vLLM: {ex}")
             message = self._fallback_local_report(flight_info, opt_res, comp_prices)
