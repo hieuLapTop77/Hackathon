@@ -270,10 +270,11 @@ def optimize_flight(base_price: float, base_lf: float, capacity: int,
     price_change_pct = ((optimal_price - base_price) / base_price * 100.0)
 
     # Recommendation text
+    price_diff = abs(optimal_price - base_price)
     if price_change_pct > 2.0:
-        recommendation = f"Nhu cầu co giãn thuận lợi (ε={elasticity:.2f}). Khuyến nghị TĂNG giá bán lên {optimal_price:,.0f} VND (+{price_change_pct:.1f}%) để tối ưu doanh thu."
+        recommendation = f"Nhu cầu co giãn thuận lợi (ε={elasticity:.2f}). Khuyến nghị TĂNG giá bán lên {optimal_price:,.0f} VND (Tăng {price_diff:,.0f} VND, +{price_change_pct:.1f}%) để tối ưu doanh thu."
     elif price_change_pct < -2.0:
-        recommendation = f"Hệ số lấp đầy thấp, nhu cầu nhạy cảm giá (ε={elasticity:.2f}). Khuyến nghị GIẢM giá xuống {optimal_price:,.0f} VND ({price_change_pct:.1f}%) để kích cầu."
+        recommendation = f"Hệ số lấp đầy thấp, nhu cầu nhạy cảm giá (ε={elasticity:.2f}). Khuyến nghị GIẢM giá xuống {optimal_price:,.0f} VND (Giảm {price_diff:,.0f} VND, {price_change_pct:.1f}%) để kích cầu."
     else:
         recommendation = f"Giá bán hiện tại đang gần tối ưu (ε={elasticity:.2f}). Giữ nguyên mức giá này."
 

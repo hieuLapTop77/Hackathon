@@ -579,11 +579,16 @@ def query_database(state: AgentState) -> dict:
                 rows = cursor.fetchall()
                 cols = [d[0] for d in cursor.description]
                 flights_list = []
+                seen_f = set()
                 for r in rows:
                     fd = dict(zip(cols, r))
                     if "flight_date" in fd and hasattr(fd["flight_date"], "isoformat"):
                         fd["flight_date"] = fd["flight_date"].isoformat()
-                    flights_list.append(fd)
+                    f_no = str(fd.get("flight_no") or "").strip()
+                    if f_no and f_no not in seen_f:
+                        seen_f.add(f_no)
+                        fd["flight_no"] = f_no
+                        flights_list.append(fd)
 
                 data = {
                     "is_aggregate": True,
@@ -654,11 +659,16 @@ def query_database(state: AgentState) -> dict:
                 rows = cursor.fetchall()
                 cols = [d[0] for d in cursor.description]
                 flights_list = []
+                seen_f = set()
                 for r in rows:
                     fd = dict(zip(cols, r))
                     if "flight_date" in fd and hasattr(fd["flight_date"], "isoformat"):
                         fd["flight_date"] = fd["flight_date"].isoformat()
-                    flights_list.append(fd)
+                    f_no = str(fd.get("flight_no") or "").strip()
+                    if f_no and f_no not in seen_f:
+                        seen_f.add(f_no)
+                        fd["flight_no"] = f_no
+                        flights_list.append(fd)
 
                 data = {
                     "is_aggregate": True,
@@ -1366,8 +1376,11 @@ async def generate_report(state: AgentState) -> dict:
 - Dự báo giá GDS (Business): {ml_pred.get('GDS', 0):,.0f} VND""")
 
         if opt:
-            sections.append(f"""KẾT QUẢ TỐI ƯU HÓA DOANH THU (SciPy):
-- Giá tối ưu khuyến nghị: {opt['optimal_price']:,.0f} VND ({opt['price_change_pct']:+.1f}%)
+            base_price = opt.get('base_price') or flight.get('price') or 1000000.0
+            price_diff = opt['optimal_price'] - base_price
+            diff_str = f"Tăng {price_diff:,.0f} VND" if price_diff > 0 else f"Giảm {abs(price_diff):,.0f} VND" if price_diff < 0 else "Giữ nguyên"
+            sections.append(f"""KẾT QUẢ TỐI ƯU HÓA DOANH THU (SciPy) VIETJET:
+- Giá tối ưu khuyến nghị: {opt['optimal_price']:,.0f} VND ({diff_str}, {opt['price_change_pct']:+.1f}%)
 - Load Factor tối ưu dự kiến: {opt['optimal_lf']*100:.1f}%
 - Tăng trưởng doanh thu dự kiến: {opt['revenue_delta_pct']:+.1f}%
 - Đề xuất: {opt['recommendation']}""")
@@ -1715,12 +1728,19 @@ async def run_supervisor_node(state: AgentState) -> dict:
                 logger.info(f"Extracted JSON from reasoning: {content}")
 
         try:
-            decision = json.loads(content)
+            import re
+            clean_content = content or ""
+            # Trích xuất chuỗi JSON nếu nó được bọc trong markdown code blocks hoặc văn bản
+            json_match = re.search(r"(\{.*\})", clean_content, re.DOTALL)
+            if json_match:
+                clean_content = json_match.group(1)
+            
+            decision = json.loads(clean_content)
             next_agent = decision.get("next_agent", "generate_report")
             reasoning = decision.get("reasoning", "")
         except (json.JSONDecodeError, TypeError):
-            # Fallback to keyword matching in content or reasoning
-            text_to_search = (content or "") + " " + (reasoning_content or "")
+            # Chỉ tìm từ khóa trong content sạch của mô hình (KHÔNG tìm trong reasoning trace để tránh nhận diện sai các thảo luận)
+            text_to_search = content or ""
             for choice in ["DatabaseAgent", "CompetitorAgent", "MLPredictionAgent", "OptimizerAgent", "RAGAgent", "PriceComparisonAgent", "PriceAdjustmentAgent", "generate_report"]:
                 if choice.lower() in text_to_search.lower():
                     next_agent = choice
@@ -1787,9 +1807,9 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
         parsed_route = flight.get("parsed_route")
         
         if parsed_route:
-            parts = [f"### Báo cáo Tổng quan Chặng bay {parsed_route} ngày {target_date}"]
+            parts = [f"### Báo cáo Tổng quan Chặng bay Vietjet {parsed_route} ngày {target_date}"]
             parts.append(f"\n- **Tổng số chuyến bay:** {flight['total_flights']} chuyến")
-            parts.append(f"- **Giá vé trung bình thực tế:** {flight['avg_price']:,.0f} VND")
+            parts.append(f"- **Giá vé trung bình thực tế Vietjet:** {flight['avg_price']:,.0f} VND")
             parts.append(f"- **Tỷ lệ lấp đầy trung bình:** {flight['avg_lf']*100:.1f}%")
         else:
             parts = [f"### Báo cáo Tổng quan Hoạt động Vietjet ngày {target_date}"]
@@ -1814,17 +1834,17 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
             if adjusted_prediction and adjusted_prediction.get("predictions"):
                 parts.append(f"\n#### Dự báo giá vé đã điều chỉnh cạnh tranh (Price Adjustment Agent)")
                 for p in adjusted_prediction["predictions"][:5]:
-                    parts.append(f"- Chuyến **{p['flight_no']}** ({p['route']}):")
+                    parts.append(f"- Chuyến bay **Vietjet {p['flight_no']}** ({p['route']}):")
                     parts.append(f"  * Eco: {p['classes'].get('Eco', 0):,.0f} VND (Gốc ML: {p['original_classes'].get('Eco', 0):,.0f} VND) | Deluxe: {p['classes'].get('Deluxe', 0):,.0f} VND | SkyBoss: {p['classes'].get('SkyBoss', 0):,.0f} VND")
                 if len(adjusted_prediction["predictions"]) > 5:
-                    parts.append(f"*và dự báo đã điều chỉnh của {len(adjusted_prediction['predictions']) - 5} chuyến bay khác...*")
+                    parts.append(f"*và dự báo đã điều chỉnh của {len(adjusted_prediction['predictions']) - 5} chuyến bay Vietjet khác...*")
             elif ml_pred and ml_pred.get("predictions"):
                 parts.append(f"\n#### Dự báo giá vé từ mô hình Machine Learning (XGBoost/Ensemble)")
                 for pred in ml_pred["predictions"][:5]:
-                    parts.append(f"- Chuyến **{pred['flight_no']}** ({pred['route']}):")
+                    parts.append(f"- Chuyến bay **Vietjet {pred['flight_no']}** ({pred['route']}):")
                     parts.append(f"  * Eco: {pred['classes'].get('Eco', 0):,.0f} VND | Deluxe: {pred['classes'].get('Deluxe', 0):,.0f} VND | SkyBoss: {pred['classes'].get('SkyBoss', 0):,.0f} VND")
                 if len(ml_pred["predictions"]) > 5:
-                    parts.append(f"*và dự báo giá của {len(ml_pred['predictions']) - 5} chuyến bay khác...*")
+                    parts.append(f"*và dự báo giá của {len(ml_pred['predictions']) - 5} chuyến bay Vietjet khác...*")
 
         if report and report.get("executive_summary"):
             parts.append(f"\n**Tóm tắt phân tích:** {report['executive_summary']}")
@@ -1832,7 +1852,7 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
         return "\n".join(parts)
 
     # Original single flight markdown formatter
-    parts = [f"### Báo cáo Phân tích Chuyến bay {flight['flight_no']}"]
+    parts = [f"### Báo cáo Phân tích Chuyến bay Vietjet {flight['flight_no']}"]
 
     # Show prediction / adjustments if general query or prediction/competitor intent
     if show_all or has_ml_intent or has_comp_intent:
@@ -1869,7 +1889,14 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
         confidence_text = {"high": "Cao", "medium": "Trung bình", "low": "Thấp"}.get(report.get("confidence_level", "medium"), "Trung bình")
         parts.append(f"\n#### 4. Khuyến nghị")
         parts.append(f"- **Giá đề xuất:** **{report['recommended_price']:,.0f} VND**")
-        if report.get("price_change_pct"):
+        if flight.get("price"):
+            price_diff = report["recommended_price"] - flight["price"]
+            diff_str = f"Tăng {price_diff:,.0f} VND" if price_diff > 0 else f"Giảm {abs(price_diff):,.0f} VND" if price_diff < 0 else "Giữ nguyên"
+            if report.get("price_change_pct"):
+                parts.append(f"- **Thay đổi:** {diff_str} ({report['price_change_pct']:+.1f}%)")
+            else:
+                parts.append(f"- **Thay đổi:** {diff_str}")
+        elif report.get("price_change_pct"):
             parts.append(f"- **Thay đổi:** {report['price_change_pct']:+.1f}%")
         parts.append(f"- **Độ tin cậy:** {confidence_text}")
 
@@ -1952,16 +1979,7 @@ def build_copilot_graph() -> StateGraph:
     )
 
     # Workers route back to the supervisor
-    graph.add_conditional_edges(
-        "query_database",
-        route_after_db,
-        {
-            "run_ml_prediction": "run_ml_prediction",
-            "check_competitors": "check_competitors",
-            "query_rag": "query_rag",
-            "supervisor": "supervisor"
-        }
-    )
+    graph.add_edge("query_database", "supervisor")
     graph.add_edge("check_competitors", "supervisor")
     graph.add_edge("run_ml_prediction", "supervisor")
     graph.add_edge("run_optimizer", "supervisor")
