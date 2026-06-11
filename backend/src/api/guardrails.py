@@ -72,11 +72,14 @@ class GuardrailsPipeline:
 
     # ── Mẫu nhận dạng thông tin cá nhân (PII) ──────────────────────
     PII_PATTERNS = [
-        (r"\b\d{9,12}\b", "phone_number"),  # Số điện thoại VN
+        # Số điện thoại VN: bắt buộc prefix 0/+84/84 để không redact nhầm
+        # các số liệu doanh thu/giá vé 9-12 chữ số trong báo cáo
+        (r"(?<![\d.,])(?:\+84|84|0)\d{9,10}\b", "phone_number"),
         (r"\b[A-Z]\d{7}\b", "passport"),    # Số Passport
-        (r"\b\d{12}\b", "citizen_id"),      # Số CCCD
+        # Số CCCD: 12 chữ số đứng độc lập, không nằm trong số có dấu phân cách nghìn
+        (r"(?<![\d.,])\d{12}(?![\d.,])", "citizen_id"),
         (r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b", "email"),
-        (r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b", "credit_card"),
+        (r"(?<![\d.,])\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}(?![\d.,])", "credit_card"),
     ]
 
     def __init__(self):
@@ -146,20 +149,44 @@ class GuardrailsPipeline:
         return {"modified": len(pii_found) > 0, "result": sanitized_query}
 
     async def _action_check_output_safety(self, response: str) -> dict:
-        """Kiểm tra các ràng buộc về giá vé đề xuất của bot."""
-        # Trích xuất giá trị tiền tệ VND trong phản hồi
-        prices = re.findall(r'\b\d{1,3}(?:[.,]\d{3})*(?:\s*VND|\s*đ)?\b', response)
+        """Kiểm tra các ràng buộc về giá vé đề xuất của bot.
+
+        Quét văn bản tự do chỉ áp dụng cho số tiền có hậu tố VND/đ và chỉ chặn
+        khi VƯỢT TRẦN. Kiểm tra giá sàn được thực hiện trên dữ liệu có cấu trúc
+        (report.recommended_price) trong check_output() — các khoản tiền nhỏ hợp lệ
+        như phụ thu, chênh lệch giá không bị chặn nhầm.
+        """
+        prices = re.findall(r'\b\d{1,3}(?:[.,]\d{3})*\s*(?:VND|đ)\b', response)
         for price_str in prices:
             num_str = re.sub(r'[^\d]', '', price_str)
             if num_str:
                 price = float(num_str)
-                # Chỉ lọc các số đại diện cho giá tiền (>1000)
-                if price >= 1000:
-                    if price < PRICE_ABSOLUTE_MIN:
-                        return {"blocked": True, "reason": f"Giá đề xuất {price:,.0f} VND quá thấp (tối thiểu {PRICE_ABSOLUTE_MIN:,.0f} VND)."}
-                    if price > PRICE_ABSOLUTE_MAX:
-                        return {"blocked": True, "reason": f"Giá đề xuất {price:,.0f} VND vượt quá giới hạn ({PRICE_ABSOLUTE_MAX:,.0f} VND)."}
+                if price > PRICE_ABSOLUTE_MAX:
+                    return {"blocked": True, "reason": f"Giá đề xuất {price:,.0f} VND vượt quá giới hạn ({PRICE_ABSOLUTE_MAX:,.0f} VND)."}
         return {"blocked": False}
+
+    def _check_recommended_price(self, response: dict) -> Optional[str]:
+        """Kiểm tra giá vé đề xuất (dữ liệu có cấu trúc) nằm trong khoảng kinh doanh cho phép."""
+        candidates = []
+        report = response.get("report") or {}
+        if isinstance(report, dict) and report.get("recommended_price"):
+            candidates.append(report["recommended_price"])
+        action = response.get("action") or {}
+        if isinstance(action, dict) and action.get("recommended_price"):
+            candidates.append(action["recommended_price"])
+
+        for raw in candidates:
+            try:
+                price = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if price <= 0:
+                continue
+            if price < PRICE_ABSOLUTE_MIN:
+                return f"Giá đề xuất {price:,.0f} VND quá thấp (tối thiểu {PRICE_ABSOLUTE_MIN:,.0f} VND)."
+            if price > PRICE_ABSOLUTE_MAX:
+                return f"Giá đề xuất {price:,.0f} VND vượt quá giới hạn ({PRICE_ABSOLUTE_MAX:,.0f} VND)."
+        return None
 
     async def _action_redact_pii_output(self, text: str) -> dict:
         """Làm sạch PII khỏi văn bản phản hồi đầu ra."""
@@ -284,6 +311,11 @@ Trả lời:"""
 
     async def check_output(self, response: dict) -> GuardrailResult:
         """Kiểm tra tính an toàn của nội dung phản hồi."""
+        # Kiểm tra giá sàn/trần trên giá đề xuất có cấu trúc trước (chính xác hơn quét text)
+        structured_reason = self._check_recommended_price(response)
+        if structured_reason:
+            return GuardrailResult.block(structured_reason, "critical")
+
         try:
             message = response.get("message", "")
             res = await self.rails.generate_async(prompt="check output", context={"message": message})

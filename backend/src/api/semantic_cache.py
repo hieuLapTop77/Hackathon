@@ -117,8 +117,12 @@ class SemanticCache:
             self.enabled = False
 
     def _query_hash(self, query: str) -> str:
-        """Generate deterministic hash for exact matching."""
-        normalized = query.lower().strip()
+        """Generate deterministic hash for exact matching.
+
+        The resolved date tag is mixed in so relative-date queries ("hôm nay")
+        asked on different days never share an exact-match entry.
+        """
+        normalized = query.lower().strip() + "|" + self._parse_date_tag(query)
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
     def _parse_route(self, query: str) -> str | None:
@@ -193,6 +197,46 @@ class SemanticCache:
                 
         return None
 
+    def _parse_flight_no(self, query: str) -> str:
+        """Parse flight number (e.g. VJ123) from query for strict cache matching."""
+        if not query:
+            return ""
+        m = re.search(r'(VJ\d{3,4})|(A\d{3})', query, re.IGNORECASE)
+        return m.group(0).upper() if m else ""
+
+    def _parse_date_tag(self, query: str) -> str:
+        """
+        Resolve the date mentioned in the query to an absolute YYYY-MM-DD tag.
+        Relative terms (hôm nay/ngày mai) are resolved against the system clock so
+        semantically-similar queries about different dates never share a cache entry.
+        Returns "" when no date is mentioned.
+        """
+        if not query:
+            return ""
+        q = query.lower()
+        today = datetime.now()
+
+        if any(k in q for k in ["hôm nay", "hom nay", "today"]):
+            return today.strftime("%Y-%m-%d")
+        if any(k in q for k in ["ngày mai", "ngay mai", "tomorrow"]):
+            return (today + timedelta(days=1)).strftime("%Y-%m-%d")
+        if any(k in q for k in ["ngày mốt", "ngay mot", "ngày kia", "ngay kia"]):
+            return (today + timedelta(days=2)).strftime("%Y-%m-%d")
+
+        m = re.search(r'\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b', query)
+        if m:
+            y, mo, d = m.groups()
+            return f"{y}-{int(mo):02d}-{int(d):02d}"
+        m = re.search(r'\b(\d{1,2})[-/](\d{1,2})[-/](20\d{2})\b', query)
+        if m:
+            d, mo, y = m.groups()
+            return f"{y}-{int(mo):02d}-{int(d):02d}"
+        m = re.search(r'\b(\d{1,2})/(\d{1,2})\b', query)
+        if m:
+            d, mo = m.groups()
+            return f"{today.year}-{int(mo):02d}-{int(d):02d}"
+        return ""
+
     def _is_fresh(self, timestamp: float) -> bool:
         """Check if cached entry is within TTL."""
         age_hours = (time.time() - timestamp) / 3600
@@ -231,19 +275,36 @@ class SemanticCache:
         try:
             query_vector = self._get_embedding(query)
 
-            # Build query filter for route
-            query_filter = None
+            # Build strict query filter: route + flight_no + date must all match.
+            # flight_no/date are always included (empty string when absent) so a
+            # 0.92+ similarity hit can never cross dates or flight numbers
+            # (e.g. "giá SGN-HAN hôm nay" vs "giá SGN-HAN ngày mai").
             effective_route = route or self._parse_route(query)
+            flight_no = self._parse_flight_no(query)
+            date_tag = self._parse_date_tag(query)
+
+            must_conditions = [
+                self._qdrant_models.FieldCondition(
+                    key="flight_no",
+                    match=self._qdrant_models.MatchValue(value=flight_no)
+                ),
+                self._qdrant_models.FieldCondition(
+                    key="date_tag",
+                    match=self._qdrant_models.MatchValue(value=date_tag)
+                ),
+            ]
             if effective_route:
-                query_filter = self._qdrant_models.Filter(
-                    must=[
-                        self._qdrant_models.FieldCondition(
-                            key="route",
-                            match=self._qdrant_models.MatchValue(value=effective_route.upper())
-                        )
-                    ]
+                must_conditions.append(
+                    self._qdrant_models.FieldCondition(
+                        key="route",
+                        match=self._qdrant_models.MatchValue(value=effective_route.upper())
+                    )
                 )
-                logger.info(f"Semantic Cache Lookup with Route Filter: '{effective_route.upper()}' for query='{query[:50]}...'")
+            query_filter = self._qdrant_models.Filter(must=must_conditions)
+            logger.info(
+                f"Semantic Cache Lookup filters: route='{(effective_route or '').upper()}', "
+                f"flight_no='{flight_no}', date='{date_tag}' for query='{query[:50]}...'"
+            )
 
             if hasattr(self.client, "query_points"):
                 results = self.client.query_points(
@@ -331,7 +392,9 @@ class SemanticCache:
 
         try:
             query_vector = self._get_embedding(query)
-            point_id = abs(hash(q_hash)) % (2**63)  # Qdrant needs int id
+            # Deterministic int id derived from SHA-256 — stable across process restarts
+            # (built-in hash() is salted per process and would create duplicate points)
+            point_id = int(q_hash[:15], 16)
 
             self.client.upsert(
                 collection_name=CACHE_COLLECTION,
@@ -344,6 +407,8 @@ class SemanticCache:
                             "query_hash": q_hash,
                             "response": json.dumps(clean_response, ensure_ascii=False),
                             "route": (effective_route or "").upper(),
+                            "flight_no": self._parse_flight_no(query),
+                            "date_tag": self._parse_date_tag(query),
                             "timestamp": now,
                         }
                     )

@@ -13,6 +13,7 @@ import os
 import re
 import json
 import logging
+import asyncio
 import httpx
 import time
 from typing import Annotated, Literal
@@ -453,6 +454,25 @@ def parse_query(state: AgentState) -> dict:
         target_date = today_dt.strftime("%Y-%m-%d") if today_dt else "2026-06-10"
     elif "ngày mai" in query_lower or "tomorrow" in query_lower:
         target_date = (today_dt + timedelta(days=1)).strftime("%Y-%m-%d") if today_dt else "2026-06-11"
+    elif "ngày mốt" in query_lower or "ngày kia" in query_lower or "ngay mot" in query_lower or "ngay kia" in query_lower:
+        target_date = (today_dt + timedelta(days=2)).strftime("%Y-%m-%d") if today_dt else "2026-06-12"
+    elif "cuối tuần sau" in query_lower or "cuoi tuan sau" in query_lower:
+        if today_dt:
+            days_to_saturday = 5 - today_dt.weekday() + 7
+            target_date = (today_dt + timedelta(days=days_to_saturday)).strftime("%Y-%m-%d")
+        else:
+            target_date = "2026-06-20"
+    elif "cuối tuần" in query_lower or "cuoi tuan" in query_lower or "weekend" in query_lower:
+        if today_dt:
+            if today_dt.weekday() in [5, 6]:
+                target_date = today_dt.strftime("%Y-%m-%d")
+            else:
+                days_to_saturday = 5 - today_dt.weekday()
+                target_date = (today_dt + timedelta(days=days_to_saturday)).strftime("%Y-%m-%d")
+        else:
+            target_date = "2026-06-13"
+    elif "tuần sau" in query_lower or "tuan sau" in query_lower or "next week" in query_lower:
+        target_date = (today_dt + timedelta(days=7)).strftime("%Y-%m-%d") if today_dt else "2026-06-18"
     else:
         # Match YYYY-MM-DD or YYYY/MM/DD specifically for June 2026
         date_match = re.search(r'\b(2026)[-/](0?6)[-/]([0-2]?\d|30)\b', query)
@@ -956,6 +976,30 @@ def run_optimizer(state: AgentState) -> dict:
         except Exception:
             pass
 
+    # Parse RAG context for events to calculate optimization modifiers
+    rag_context = state.get("rag_context") or ""
+    demand_shift = 1.0
+    elasticity_adj = 0.0
+
+    if rag_context:
+        rag_lower = rag_context.lower()
+        # 1. High-demand events / Festivals / Holidays
+        if any(term in rag_lower for term in ["lễ hội", "festival", "tết", "concert", "cao điểm", "pháo hoa", "diff", "biển nha trang"]):
+            demand_shift = 1.25
+            elasticity_adj = 0.25  # Make elasticity less negative (less price sensitive)
+        # 2. Strong general travel weeks
+        elif any(term in rag_lower for term in ["tuần lễ du lịch", "mùa du lịch hè", "tăng mạnh", "tăng vọt"]):
+            demand_shift = 1.15
+            elasticity_adj = 0.15
+        # 3. Adverse weather
+        elif any(term in rag_lower for term in ["mưa lớn kéo dài", "cảnh báo mưa lớn", "bão", "thiên tai", "hoãn lịch trình"]):
+            demand_shift = 0.85
+            elasticity_adj = -0.15  # Make elasticity more negative (more price sensitive, stimulate demand)
+        # 4. Promo sales / Low season stimulation
+        elif any(term in rag_lower for term in ["săn sale", "khuyến mãi lớn", "kích cầu", "thấp điểm"]):
+            demand_shift = 1.10
+            elasticity_adj = -0.20  # High price sensitivity
+
     opt = optimize_flight(
         base_price=flight["price"],
         base_lf=flight["lf"],
@@ -963,16 +1007,28 @@ def run_optimizer(state: AgentState) -> dict:
         route=route,
         fare_class=fare_class,
         month=month,
+        demand_shift_factor=demand_shift,
+        elasticity_adjustment=elasticity_adj
     )
     elasticity_info = f", ε={opt.get('elasticity_used', -1.2):.2f} ({opt.get('elasticity_source', 'default')})"
+    
+    rag_info = ""
+    if demand_shift != 1.0 or elasticity_adj != 0.0:
+        rag_info = f", RAG điều chỉnh: Nhu cầu x{demand_shift:.2f}, ε thay đổi {elasticity_adj:+.2f}"
+
     tools_called.append({
         "name": "Revenue Optimizer (SciPy + Data-Driven Elasticity)",
-        "args": f"base_price={flight['price']}, base_lf={flight['lf']}, capacity={flight['capacity']}, route={route}",
+        "args": f"base_price={flight['price']}, base_lf={flight['lf']}, capacity={flight['capacity']}, route={route}{rag_info}",
         "result": f"Giá tối ưu: {opt['optimal_price']:,.0f} VND ({opt['price_change_pct']:+.1f}%), LF dự kiến: {opt['optimal_lf']*100:.1f}%, Doanh thu: {opt['revenue_delta_pct']:+.1f}%{elasticity_info}"
     })
 
     if _current_trace:
-        _current_trace.end_span("run_optimizer", {"optimal_price": opt["optimal_price"], "elasticity": opt.get("elasticity_used")})
+        _current_trace.end_span("run_optimizer", {
+            "optimal_price": opt["optimal_price"],
+            "elasticity": opt.get("elasticity_used"),
+            "demand_shift_factor": demand_shift,
+            "elasticity_adjustment": elasticity_adj
+        })
 
     return {"optimizer_result": opt, "tools_called": tools_called}
 
@@ -1379,8 +1435,14 @@ async def generate_report(state: AgentState) -> dict:
             base_price = opt.get('base_price') or flight.get('price') or 1000000.0
             price_diff = opt['optimal_price'] - base_price
             diff_str = f"Tăng {price_diff:,.0f} VND" if price_diff > 0 else f"Giảm {abs(price_diff):,.0f} VND" if price_diff < 0 else "Giữ nguyên"
+            
+            # Format RAG parameters if applied
+            rag_details = ""
+            if opt.get("demand_shift_factor", 1.0) != 1.0 or opt.get("elasticity_adjustment", 0.0) != 0.0:
+                rag_details = f"\n- Điều chỉnh nhu cầu nền (RAG): x{opt['demand_shift_factor']:.2f}\n- Điều chỉnh độ co giãn cầu (RAG): {opt['elasticity_adjustment']:+.2f} (Độ co giãn gốc: {opt.get('original_elasticity', -1.2):.2f} -> Độ co giãn sử dụng: {opt['elasticity_used']:.2f})"
+                
             sections.append(f"""KẾT QUẢ TỐI ƯU HÓA DOANH THU (SciPy) VIETJET:
-- Giá tối ưu khuyến nghị: {opt['optimal_price']:,.0f} VND ({diff_str}, {opt['price_change_pct']:+.1f}%)
+- Giá tối ưu khuyến nghị: {opt['optimal_price']:,.0f} VND ({diff_str}, {opt['price_change_pct']:+.1f}%){rag_details}
 - Load Factor tối ưu dự kiến: {opt['optimal_lf']*100:.1f}%
 - Tăng trưởng doanh thu dự kiến: {opt['revenue_delta_pct']:+.1f}%
 - Đề xuất: {opt['recommendation']}""")
@@ -1537,8 +1599,17 @@ def _supervisor_fallback_heuristic(state: AgentState, tools_called: list) -> str
     return "generate_report"
 
 
+# Cache for the resolved vLLM model name — avoids an extra HTTP round-trip
+# to /models before every single LLM call (supervisor loops + report)
+_MODEL_NAME_TTL_S = 60.0
+_model_name_cache: dict = {"name": None, "ts": 0.0}
+
+
 async def get_active_model_name() -> str:
     """Fetch the active model name loaded in vLLM dynamically, fallback to LLM_MODEL."""
+    now = time.time()
+    if _model_name_cache["name"] and (now - _model_name_cache["ts"]) < _MODEL_NAME_TTL_S:
+        return _model_name_cache["name"]
     try:
         headers = {}
         if VLLM_API_KEY:
@@ -1550,9 +1621,14 @@ async def get_active_model_name() -> str:
                 if "data" in data and len(data["data"]) > 0:
                     model_id = data["data"][0]["id"]
                     logger.info(f"Dynamically resolved active vLLM model: '{model_id}'")
+                    _model_name_cache["name"] = model_id
+                    _model_name_cache["ts"] = now
                     return model_id
     except Exception as e:
         logger.warning(f"Failed to dynamically query vLLM models list: {e}. Using fallback {LLM_MODEL}")
+    # Cache the fallback too, so a down vLLM doesn't add a timeout before every call
+    _model_name_cache["name"] = LLM_MODEL
+    _model_name_cache["ts"] = now
     return LLM_MODEL
 
 
@@ -1576,8 +1652,10 @@ async def call_nim_llm(prompt: str, schema: dict | None = None, temperature: flo
         }
         if api_key:
             kwargs["nvidia_api_key"] = api_key
-        if VLLM_URL and "localhost" not in VLLM_URL and "127.0.0.1" not in VLLM_URL:
-            # If using self-hosted NIM URL
+        if VLLM_URL:
+            # Always honor the configured endpoint (self-hosted vLLM/NIM).
+            # Without this, ChatNVIDIA defaults to the NVIDIA cloud API even
+            # when a local vLLM is intended (e.g. VLLM_URL=http://localhost:8001/v1).
             kwargs["base_url"] = VLLM_URL.rstrip('/')
             
         chat_client = ChatNVIDIA(**kwargs)
@@ -2085,7 +2163,9 @@ async def run_copilot_graph(user_query: str) -> dict:
     cache = get_cache()
     # Extract route to apply route filtering in Qdrant
     parsed_route = cache._parse_route(effective_query)
-    cached = cache.get(effective_query, route=parsed_route)
+    # cache.get performs a synchronous HTTP call to the NIM embedding service —
+    # run it in a worker thread so the FastAPI event loop is not blocked
+    cached = await asyncio.to_thread(cache.get, effective_query, parsed_route)
     if cached:
         logger.info(f"Cache hit for query: '{effective_query[:50]}...' (route: {parsed_route})")
         return cached
@@ -2161,9 +2241,9 @@ async def run_copilot_graph(user_query: str) -> dict:
 
         response["message"] = await guardrails.filter_output_content(response["message"])
 
-        # Store in cache
+        # Store in cache (embedding call runs off the event loop)
         route = flight.get("route", "")
-        cache.put(effective_query, response, route=route)
+        await asyncio.to_thread(cache.put, effective_query, response, route)
 
         if _current_trace_var.get() is not None:
             _current_trace_var.get().finalize(output={"flight_no": flight.get("flight_no"), "recommended_price": recommended_price})
