@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Try to import LangGraph agent first, fallback to legacy
 _use_langgraph = True
 try:
-    from ..agent_graph import run_copilot_graph, VLLM_URL, LLM_MODEL
+    from ..agent_graph import run_copilot_graph, run_copilot_graph_stream, VLLM_URL, LLM_MODEL
     logger.info("Using LangGraph-based copilot agent")
 except ImportError as e:
     logger.warning(f"LangGraph not available ({e}). Falling back to legacy agent.")
@@ -128,9 +128,9 @@ async def agent_chat(req: AgentChatRequest, background_tasks: BackgroundTasks, u
         # 1. Save user query to database
         sqlserver.save_chat_message(session_id, "user", req.query)
 
-        # 2. Run agent graph
+        # 2. Run agent graph (session_id enables multi-turn context resolution)
         if _use_langgraph:
-            res = await run_copilot_graph(req.query)
+            res = await run_copilot_graph(req.query, session_id=session_id)
         else:
             agent = RevenueCopilotAgent()
             res = await agent.run_copilot_flow(req.query)
@@ -151,6 +151,58 @@ async def agent_chat(req: AgentChatRequest, background_tasks: BackgroundTasks, u
     except Exception as e:
         logger.error(f"Agent chat failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/agent/chat/stream")
+async def agent_chat_stream(req: AgentChatRequest, user: dict = Depends(verify_token), _=Depends(rate_limit_copilot)):
+    """
+    SSE streaming version of /agent/chat: emits pipeline progress events
+    ({"type": "status", ...}) while the agent works, then the final response
+    ({"type": "result", "data": {...}}) as the last event.
+    """
+    if not _use_langgraph:
+        raise HTTPException(status_code=501, detail="Streaming requires the LangGraph agent.")
+
+    import json as _json
+    from fastapi.responses import StreamingResponse
+
+    session_id = req.session_id
+    if not session_id or not sqlserver.chat_session_exists(session_id):
+        words = req.query.split()
+        title = " ".join(words[:5]) + ("..." if len(words) > 5 else "")
+        session_id = sqlserver.create_chat_session(title)
+
+    sqlserver.save_chat_message(session_id, "user", req.query)
+
+    async def event_generator():
+        def sse(payload: dict) -> str:
+            return f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
+
+        try:
+            async for event in run_copilot_graph_stream(req.query, session_id=session_id):
+                if event.get("type") == "result":
+                    res = event.get("data") or {}
+                    res["session_id"] = session_id
+                    sqlserver.save_chat_message(
+                        session_id,
+                        "assistant",
+                        res.get("message", ""),
+                        thinking=res.get("thinking"),
+                        tools_called=res.get("tools_called"),
+                        action=res.get("action"),
+                    )
+                    yield sse({"type": "result", "data": res})
+                else:
+                    yield sse(event)
+        except Exception as e:
+            logger.error(f"Agent chat stream failed: {e}", exc_info=True)
+            yield sse({"type": "error", "message": str(e), "session_id": session_id})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/agent/retrain")

@@ -281,6 +281,74 @@ Trả lời:"""
 
     # ── Các API Interface chính cho Agent Graph ───────────────────────────────
 
+    async def check_input_fast(self, query: str) -> GuardrailResult:
+        """
+        Tầng kiểm tra RẺ và deterministic (độ dài, regex injection, redact PII).
+        Chạy TRƯỚC cache lookup — không tốn LLM call, giữ cache hit thực sự nhanh.
+        """
+        action_check = await self._action_check_input_safety(query)
+        if action_check.get("blocked"):
+            return GuardrailResult.block(action_check.get("reason"), "critical")
+
+        redact_res = await self._action_redact_pii_input(query)
+        if redact_res.get("modified"):
+            return GuardrailResult(
+                passed=True, blocked=False, reason="PII Redacted",
+                modified_input=redact_res.get("result"),
+            )
+        return GuardrailResult.ok()
+
+    async def check_input_semantic(self, query: str) -> GuardrailResult:
+        """
+        Tầng kiểm tra ngữ nghĩa qua LLM (đắt). Chỉ gọi khi cache MISS —
+        câu hỏi đã có trong cache nghĩa là từng vượt qua kiểm tra này rồi.
+        """
+        try:
+            allowed = await self._action_self_check_input(query)
+            if not allowed:
+                return GuardrailResult.block(
+                    "Phát hiện yêu cầu không an toàn hoặc ngoài phạm vi qua phân tích LLM.",
+                    "critical",
+                )
+        except Exception as e:
+            logger.error(f"Error in semantic input check: {e}")
+            # Fail-open như hành vi cũ để không nghẽn luồng khi LLM lỗi
+        return GuardrailResult.ok()
+
+    async def review_output(self, response: dict) -> tuple[GuardrailResult, str]:
+        """
+        Kiểm tra VÀ làm sạch output trong MỘT lượt duy nhất (thay cho việc gọi
+        check_output rồi filter_output_content — vốn chạy cùng Colang flow 2 lần,
+        tốn gấp đôi LLM self-check).
+
+        Returns (result, filtered_message): filtered_message là message đã redact
+        PII, dùng khi result không bị blocked.
+        """
+        message = response.get("message", "")
+
+        # 1. Kiểm tra giá đề xuất có cấu trúc (rẻ, chính xác)
+        structured_reason = self._check_recommended_price(response)
+        if structured_reason:
+            return GuardrailResult.block(structured_reason, "critical"), message
+
+        # 2. Một lượt Colang flow duy nhất: business check + LLM self-check + PII redact
+        try:
+            res = await self.rails.generate_async(prompt="check output", context={"message": message})
+            if res.startswith("BLOCKED:"):
+                reason = res.replace("BLOCKED:", "").strip()
+                return GuardrailResult.block(reason, "critical"), message
+            if res.startswith("ALLOWED:"):
+                return GuardrailResult.ok(), res.replace("ALLOWED:", "").strip()
+            return GuardrailResult.ok(), message
+        except Exception as e:
+            logger.error(f"Error in NeMo Guardrails review_output: {e}", exc_info=True)
+            # Khôi phục bằng custom actions trực tiếp
+            action_check = await self._action_check_output_safety(message)
+            if action_check.get("blocked"):
+                return GuardrailResult.block(action_check.get("reason"), "critical"), message
+            redact_res = await self._action_redact_pii_output(message)
+            return GuardrailResult.ok(), redact_res.get("result", message)
+
     async def check_input(self, query: str) -> GuardrailResult:
         """Kiểm tra an toàn cho câu truy vấn người dùng."""
         try:

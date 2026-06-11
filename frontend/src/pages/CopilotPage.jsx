@@ -17,6 +17,7 @@ export function CopilotPage() {
   const [messages, setMessages] = useState(INITIAL_GREETING);
   const [inputValue, setInputValue] = useState("");
   const [loading, setLoading] = useState(false);
+  const [liveStatus, setLiveStatus] = useState(null);
   const [statusData, setStatusData] = useState({ vllm_connected: false, vllm_model: "offline" });
   const [toast, setToast] = useState(null);
   const [reasoningEnabled, setReasoningEnabled] = useState(true);
@@ -140,22 +141,11 @@ export function CopilotPage() {
     // Add user message to UI state temporarily
     setMessages(prev => [...prev, { role: "user", text }]);
     setLoading(true);
+    setLiveStatus(null);
 
-    try {
-      const response = await fetch(`${API}/agent/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query: text,
-          session_id: currentSessionId
-        })
-      });
+    const requestBody = JSON.stringify({ query: text, session_id: currentSessionId });
 
-      if (!response.ok) throw new Error("API error");
-
-      const data = await response.json();
-      
-      // Update message list
+    const applyResult = (data) => {
       setMessages(prev => [...prev, {
         role: "assistant",
         thinking: data.thinking,
@@ -163,23 +153,80 @@ export function CopilotPage() {
         tools: data.tools_called || [],
         action: data.action || null
       }]);
-
       // If it was a new chat, update session state and reload list
       if (!currentSessionId) {
         setCurrentSessionId(data.session_id);
         fetchSessions(true);
       } else {
-        // Just refresh the sessions list to show updated timestamp
         fetchSessions();
       }
+    };
+
+    let streamed = false; // received at least one SSE event
+    try {
+      // Streaming endpoint: shows live agent progress while workers run
+      const response = await fetch(`${API}/agent/chat/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: requestBody
+      });
+      if (!response.ok || !response.body) throw new Error("stream unavailable");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let gotResult = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop();
+        for (const evt of events) {
+          const line = evt.split("\n").find(l => l.startsWith("data: "));
+          if (!line) continue;
+          const payload = JSON.parse(line.slice(6));
+          streamed = true;
+          if (payload.type === "status") {
+            setLiveStatus(payload.label);
+          } else if (payload.type === "result") {
+            gotResult = true;
+            applyResult(payload.data);
+          } else if (payload.type === "error") {
+            throw new Error(payload.message || "Agent error");
+          }
+        }
+      }
+      if (!gotResult) throw new Error("Stream ended without result");
     } catch (err) {
-      setMessages(prev => [...prev, {
-        role: "assistant",
-        text: "Đã xảy ra lỗi khi xử lý yêu cầu. Vui lòng kiểm tra kết nối với server backend và cụm vLLM.",
-        tools: []
-      }]);
+      if (!streamed) {
+        // Streaming endpoint unreachable — fall back to classic JSON endpoint
+        try {
+          const response = await fetch(`${API}/agent/chat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: requestBody
+          });
+          if (!response.ok) throw new Error("API error");
+          applyResult(await response.json());
+        } catch (err2) {
+          setMessages(prev => [...prev, {
+            role: "assistant",
+            text: "Đã xảy ra lỗi khi xử lý yêu cầu. Vui lòng kiểm tra kết nối với server backend và cụm vLLM.",
+            tools: []
+          }]);
+        }
+      } else {
+        setMessages(prev => [...prev, {
+          role: "assistant",
+          text: "Đã xảy ra lỗi khi xử lý yêu cầu. Vui lòng kiểm tra kết nối với server backend và cụm vLLM.",
+          tools: []
+        }]);
+      }
     } finally {
       setLoading(false);
+      setLiveStatus(null);
     }
   };
 
@@ -828,7 +875,7 @@ export function CopilotPage() {
                       display: "inline-block",
                       animation: "spin 1s linear infinite"
                     }} />
-                    <span>Chờ vLLM phân chia Tensor & Nemotron suy luận...</span>
+                    <span>{liveStatus || "Chờ vLLM phân chia Tensor & Nemotron suy luận..."}</span>
                   </div>
                 </div>
               )}

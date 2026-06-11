@@ -536,6 +536,14 @@ def parse_query(state: AgentState) -> dict:
     comparison_keywords = ["so sánh", "đối thủ", "hãng khác", "bamboo", "vietnam airlines", "vietravel", "pacific", "compare", "competitor"]
     comparison_intent = any(kw in query_lower for kw in comparison_keywords)
 
+    # 4b. Multi-turn fallback: fill missing slots from session context seeded
+    # into the initial state (e.g. follow-up "còn ngày mốt thì sao?" inherits
+    # the route from the previous turn but keeps its own freshly-parsed date)
+    if not parsed_route and state.get("parsed_route"):
+        parsed_route = state["parsed_route"]
+    if not target_date and state.get("target_date"):
+        target_date = state["target_date"]
+
     # 5. Set search term
     search_term = ""
     has_target = False
@@ -547,6 +555,11 @@ def parse_query(state: AgentState) -> dict:
         has_target = True
     elif target_date:
         search_term = target_date
+        has_target = True
+
+    if not has_target and state.get("search_term"):
+        # Inherit the previous turn's target (e.g. flight number) wholesale
+        search_term = state["search_term"]
         has_target = True
 
     # 6. Tools needed
@@ -2310,38 +2323,134 @@ _copilot_graph = build_copilot_graph().compile()
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-async def run_copilot_graph(user_query: str) -> dict:
-    """
-    Execute the LangGraph copilot pipeline with guardrails and semantic cache.
-    Returns the same response format as the old agent_workflow.py for backward compatibility.
-    """
-    global _current_trace
+# Multi-turn session context: remembers the last resolved target per chat session
+# so follow-ups like "còn ngày mốt thì sao?" inherit route/flight from history.
+_SESSION_CTX_TTL_S = 30 * 60
+_MAX_SESSION_CTX = 500
+_session_context: dict = {}
 
-    # ── Layer 1: Input Guardrails ────────────────────────────────
+
+def _get_session_context(session_id) -> dict | None:
+    if session_id is None:
+        return None
+    ctx = _session_context.get(session_id)
+    if not ctx:
+        return None
+    if time.time() - ctx.get("ts", 0) > _SESSION_CTX_TTL_S:
+        _session_context.pop(session_id, None)
+        return None
+    return ctx
+
+
+def _update_session_context(session_id, result: dict) -> None:
+    """Persist the resolved target of this turn for follow-up resolution."""
+    if session_id is None:
+        return
+    flight = result.get("flight_data") or {}
+    is_aggregate = bool(flight.get("is_aggregate"))
+    parsed_route = result.get("parsed_route") or (flight.get("route") if not is_aggregate else None)
+    flight_no = (flight.get("flight_no") or "") if not is_aggregate else ""
+    target_date = result.get("target_date")
+    search_term = result.get("search_term") or ""
+    if not (parsed_route or flight_no or target_date or search_term):
+        return
+    if len(_session_context) >= _MAX_SESSION_CTX:
+        oldest = min(_session_context, key=lambda k: _session_context[k].get("ts", 0))
+        _session_context.pop(oldest, None)
+    _session_context[session_id] = {
+        "search_term": flight_no or search_term,
+        "parsed_route": parsed_route,
+        "target_date": target_date,
+        "ts": time.time(),
+    }
+
+
+NODE_STATUS_LABELS = {
+    "parse_query": "Đã phân tích câu hỏi (chặng bay / ngày / số hiệu).",
+    "supervisor": "Supervisor đang điều phối tác tử...",
+    "query_database": "Đã truy vấn dữ liệu chuyến bay từ SQL Server.",
+    "run_ml_prediction": "Đã chạy dự báo giá vé bằng mô hình ML.",
+    "run_optimizer": "Đã tối ưu hóa doanh thu (SciPy + yếu tố thị trường).",
+    "check_competitors": "Đã thu thập giá vé đối thủ.",
+    "query_rag": "Đã tra cứu bối cảnh thị trường (RAG).",
+    "price_comparison": "Đã lập bảng so sánh giá với đối thủ.",
+    "price_adjustment": "Đã điều chỉnh giá dự báo theo cạnh tranh.",
+    "generate_report": "Đã tổng hợp báo cáo cuối cùng.",
+}
+
+
+def _blocked_response(reason: str, severity: str, user_query: str) -> dict:
+    return {
+        "thinking": "Guardrails: Input blocked.",
+        "message": f"Cảnh báo: {reason}",
+        "tools_called": [{"name": "Guardrails (Input)", "args": user_query[:100], "result": reason}],
+        "report": None,
+        "action": {"type": "none"},
+        "guardrail": {"blocked": True, "reason": reason, "severity": severity},
+    }
+
+
+async def run_copilot_graph_stream(user_query: str, session_id=None):
+    """
+    Async generator executing the copilot pipeline with progress events:
+      {"type": "status", "node": ..., "label": ...}  — pipeline progress
+      {"type": "result", "data": {...}}              — final response (always last)
+
+    Pipeline order (cheap before expensive):
+      fast guardrails (regex/PII, no LLM) → multi-turn context seed → semantic
+      cache → LLM input self-check (cache miss only) → LangGraph → merged
+      output review → cache store.
+    """
+    # ── Layer 1a: Fast deterministic input guardrails (no LLM) ──
     guardrails = get_guardrails()
-    input_check = await guardrails.check_input(user_query)
+    input_check = await guardrails.check_input_fast(user_query)
     if input_check.blocked:
-        return {
-            "thinking": "Guardrails: Input blocked.",
-            "message": f"Cảnh báo: {input_check.reason}",
-            "tools_called": [{"name": "Guardrails (Input)", "args": user_query[:100], "result": input_check.reason}],
-            "report": None,
-            "action": {"type": "none"},
-            "guardrail": {"blocked": True, "reason": input_check.reason, "severity": input_check.severity},
-        }
+        yield {"type": "result", "data": _blocked_response(input_check.reason, input_check.severity, user_query)}
+        return
 
     effective_query = input_check.modified_input or user_query
 
+    # ── Multi-turn: resolve follow-up references from session context ──
+    seed_state: dict = {}
+    cache_query = effective_query
+    session_ctx = _get_session_context(session_id)
+    if session_ctx:
+        raw_pre = parse_query({"user_query": effective_query})
+        seeded_pre = parse_query({
+            "user_query": effective_query,
+            "search_term": session_ctx.get("search_term") or "",
+            "parsed_route": session_ctx.get("parsed_route"),
+            "target_date": session_ctx.get("target_date"),
+        })
+        slots = ("search_term", "parsed_route", "target_date")
+        if any(seeded_pre.get(s) != raw_pre.get(s) for s in slots):
+            seed_state = {s: session_ctx.get(s) for s in slots if session_ctx.get(s)}
+            # Tag the cache key with the resolved context so a follow-up in one
+            # session can never hit a cache entry resolved differently elsewhere
+            ctx_parts = [str(seeded_pre.get(s)) for s in ("parsed_route", "target_date") if seeded_pre.get(s)]
+            if not ctx_parts and seeded_pre.get("search_term"):
+                ctx_parts = [str(seeded_pre["search_term"])]
+            cache_query = f"{effective_query} [ngữ cảnh: {' '.join(ctx_parts)}]"
+            logger.info(f"[Multi-turn] Session {session_id} seeded context: {seed_state}")
+
     # ── Layer 2: Semantic Cache Check ───────────────────────────
     cache = get_cache()
-    # Extract route to apply route filtering in Qdrant
-    parsed_route = cache._parse_route(effective_query)
+    parsed_route = seed_state.get("parsed_route") or cache._parse_route(cache_query)
     # cache.get performs a synchronous HTTP call to the NIM embedding service —
     # run it in a worker thread so the FastAPI event loop is not blocked
-    cached = await asyncio.to_thread(cache.get, effective_query, parsed_route)
+    cached = await asyncio.to_thread(cache.get, cache_query, parsed_route)
     if cached:
-        logger.info(f"Cache hit for query: '{effective_query[:50]}...' (route: {parsed_route})")
-        return cached
+        logger.info(f"Cache hit for query: '{cache_query[:50]}...' (route: {parsed_route})")
+        yield {"type": "result", "data": cached}
+        return
+
+    # ── Layer 1b: Semantic input guardrail (LLM) — cache miss only ──
+    # Cache hits skip this by design: a cached query already passed it once.
+    yield {"type": "status", "node": "guardrails", "label": "Đang kiểm tra an toàn nội dung (LLM self-check)..."}
+    semantic_check = await guardrails.check_input_semantic(effective_query)
+    if semantic_check.blocked:
+        yield {"type": "result", "data": _blocked_response(semantic_check.reason, semantic_check.severity, user_query)}
+        return
 
     # ── Layer 3: Execute LangGraph Pipeline ─────────────────────
     _current_trace_var.set(TraceContext(effective_query))
@@ -2368,9 +2477,23 @@ async def run_copilot_graph(user_query: str) -> dict:
         "parsed_route": None,
         "comparison_intent": False
     }
+    initial_state.update(seed_state)
 
     try:
-        result = await _copilot_graph.ainvoke(initial_state)
+        # Stream node-level progress while accumulating the final state.
+        # "updates" gives completed node names, "values" gives state snapshots.
+        result = None
+        async for mode, chunk in _copilot_graph.astream(initial_state, stream_mode=["updates", "values"]):
+            if mode == "updates" and isinstance(chunk, dict):
+                for node_name in chunk:
+                    label = NODE_STATUS_LABELS.get(node_name)
+                    if label:
+                        yield {"type": "status", "node": node_name, "label": label}
+            elif mode == "values":
+                result = chunk
+
+        if result is None:
+            result = await _copilot_graph.ainvoke(initial_state)
 
         flight = result.get("flight_data") or {}
         opt = result.get("optimizer_result") or {}
@@ -2406,21 +2529,25 @@ async def run_copilot_graph(user_query: str) -> dict:
             "action": action
         }
 
-        # ── Layer 4: Output Guardrails ──────────────────────────
-        output_check = await guardrails.check_output(response)
+        # ── Layer 4: Output Guardrails — single merged review pass ──
+        # (check + PII filter in one Colang flow run instead of two)
+        output_check, filtered_message = await guardrails.review_output(response)
         if output_check.blocked:
             response["message"] += f"\n\n**Guardrail Warning:** {output_check.reason}"
             response["guardrail"] = {"blocked": False, "warning": output_check.reason}
-
-        response["message"] = await guardrails.filter_output_content(response["message"])
+        else:
+            response["message"] = filtered_message
 
         # Store in cache (embedding call runs off the event loop)
         route = flight.get("route", "")
-        await asyncio.to_thread(cache.put, effective_query, response, route)
+        await asyncio.to_thread(cache.put, cache_query, response, route)
+
+        # Remember this turn's resolved target for multi-turn follow-ups
+        _update_session_context(session_id, result)
 
         if _current_trace_var.get() is not None:
             _current_trace_var.get().finalize(output={"flight_no": flight.get("flight_no"), "recommended_price": recommended_price})
-        return response
+        yield {"type": "result", "data": response}
 
     except Exception as e:
         logger.error(f"Copilot graph failed: {e}", exc_info=True)
@@ -2429,3 +2556,17 @@ async def run_copilot_graph(user_query: str) -> dict:
         raise
     finally:
         _current_trace_var.set(None)
+
+
+async def run_copilot_graph(user_query: str, session_id=None) -> dict:
+    """
+    Backward-compatible entrypoint: consumes the streaming pipeline and returns
+    only the final response dict (same format as before).
+    """
+    final = None
+    async for event in run_copilot_graph_stream(user_query, session_id=session_id):
+        if event.get("type") == "result":
+            final = event.get("data")
+    if final is None:
+        raise RuntimeError("Copilot pipeline produced no result")
+    return final
