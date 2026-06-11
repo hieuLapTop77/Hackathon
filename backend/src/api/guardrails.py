@@ -186,8 +186,27 @@ Câu hỏi của người dùng:
 Câu hỏi này có an toàn và hợp lệ hay không? Trả lời "yes" hoặc "no".
 Trả lời:"""
         try:
-            response = await self.rails.llm.ainvoke(prompt)
-            result = response.content.strip().lower()
+            llm = self.rails.llm
+            # 1. Thử nếu đối tượng có Langchain model nội bộ (llm.model) hỗ trợ ainvoke
+            if hasattr(llm, "model") and hasattr(llm.model, "ainvoke"):
+                response = await llm.model.ainvoke(prompt)
+                result = response.content.strip().lower()
+            # 2. Thử gọi trực tiếp ainvoke của llm
+            elif hasattr(llm, "ainvoke"):
+                response = await llm.ainvoke(prompt)
+                result = response.content.strip().lower()
+            # 3. Thử gọi hàm generate_async của NeMo
+            elif hasattr(llm, "generate_async"):
+                response = await llm.generate_async(messages=[{"role": "user", "content": prompt}])
+                result = response.strip().lower()
+            # 4. Thử gọi hàm generate đồng bộ của NeMo
+            elif hasattr(llm, "generate"):
+                response = llm.generate(messages=[{"role": "user", "content": prompt}])
+                result = response.strip().lower()
+            else:
+                response = await llm(prompt)
+                result = str(response).strip().lower()
+                
             return "yes" in result
         except Exception as e:
             logger.error(f"Error in LLM self check input: {e}")
@@ -207,8 +226,27 @@ Nội dung phản hồi của bot:
 Nội dung này có an toàn và hợp lệ hay không? Trả lời "yes" hoặc "no".
 Trả lời:"""
         try:
-            response = await self.rails.llm.ainvoke(prompt)
-            result = response.content.strip().lower()
+            llm = self.rails.llm
+            # 1. Thử nếu đối tượng có Langchain model nội bộ (llm.model) hỗ trợ ainvoke
+            if hasattr(llm, "model") and hasattr(llm.model, "ainvoke"):
+                response = await llm.model.ainvoke(prompt)
+                result = response.content.strip().lower()
+            # 2. Thử gọi trực tiếp ainvoke của llm
+            elif hasattr(llm, "ainvoke"):
+                response = await llm.ainvoke(prompt)
+                result = response.content.strip().lower()
+            # 3. Thử gọi hàm generate_async của NeMo
+            elif hasattr(llm, "generate_async"):
+                response = await llm.generate_async(messages=[{"role": "user", "content": prompt}])
+                result = response.strip().lower()
+            # 4. Thử gọi hàm generate đồng bộ của NeMo
+            elif hasattr(llm, "generate"):
+                response = llm.generate(messages=[{"role": "user", "content": prompt}])
+                result = response.strip().lower()
+            else:
+                response = await llm(prompt)
+                result = str(response).strip().lower()
+
             return "yes" in result
         except Exception as e:
             logger.error(f"Error in LLM self check output: {e}")
@@ -219,8 +257,8 @@ Trả lời:"""
     async def check_input(self, query: str) -> GuardrailResult:
         """Kiểm tra an toàn cho câu truy vấn người dùng."""
         try:
-            # Gửi tin nhắn định dạng Colang Flow tới Rails
-            res = await self.rails.generate_async(prompt=f"CHECK_INPUT: {query}")
+            # Gửi tin nhắn kích hoạt tĩnh kèm context chứa query
+            res = await self.rails.generate_async(prompt="check input", context={"query": query})
 
             if res.startswith("BLOCKED:"):
                 reason = res.replace("BLOCKED:", "").strip()
@@ -248,7 +286,7 @@ Trả lời:"""
         """Kiểm tra tính an toàn của nội dung phản hồi."""
         try:
             message = response.get("message", "")
-            res = await self.rails.generate_async(prompt=f"CHECK_OUTPUT: {message}")
+            res = await self.rails.generate_async(prompt="check output", context={"message": message})
 
             if res.startswith("BLOCKED:"):
                 reason = res.replace("BLOCKED:", "").strip()
@@ -266,7 +304,7 @@ Trả lời:"""
     async def filter_output_content(self, message: str) -> str:
         """Làm sạch PII hoặc nội dung nhạy cảm khỏi văn bản phản hồi."""
         try:
-            res = await self.rails.generate_async(prompt=f"CHECK_OUTPUT: {message}")
+            res = await self.rails.generate_async(prompt="check output", context={"message": message})
             if res.startswith("ALLOWED:"):
                 return res.replace("ALLOWED:", "").strip()
             return message
