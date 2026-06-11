@@ -160,7 +160,10 @@ class GuardrailsPipeline:
                 "reason": (
                     "Câu hỏi nằm ngoài phạm vi nghiệp vụ kiểm soát giá vé. "
                     "Vui lòng hỏi về giá vé, chuyến bay, dự báo giá, đối thủ cạnh tranh "
-                    "hoặc tối ưu doanh thu (ví dụ: 'giá chuyến bay DAD-SGN hôm nay')."
+                    "hoặc tối ưu doanh thu (ví dụ: 'giá chuyến bay DAD-SGN hôm nay'). / "
+                    "This question is outside the fare-control scope. Please ask about "
+                    "fares, flights, price forecasts, competitors, or revenue optimization "
+                    "(e.g. 'DAD-SGN fares today')."
                 ),
             }
 

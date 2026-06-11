@@ -30,6 +30,38 @@ def vn_now() -> datetime:
     """Current datetime in Vietnam local time (UTC+7)."""
     return datetime.now(tz=VN_TZ)
 
+
+# ── Response language detection ──────────────────────────────────────────────
+# The copilot answers in the user's language: Vietnamese question → Vietnamese
+# answer, English question → English answer. Ambiguous queries default to vi
+# (primary user base is Vietjet fare-control staff).
+
+_VI_CHARS_RE = re.compile(
+    r"[ăđơưàáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵ]"
+)
+# Vietnamese typed without diacritics still counts as Vietnamese
+_VI_HINTS = (
+    "gia ve", "ve may bay", "chuyen bay", "chang bay", "hom nay", "ngay mai",
+    "cho toi", "bao nhieu", "doi thu", "du bao", "du doan", "toi uu",
+    "lap day", "so sanh", "khuyen nghi", "hang ve",
+)
+_EN_HINTS = (
+    "the", "what", "how", "give", "show", "me", "price", "prices", "fare",
+    "fares", "flight", "flights", "today", "tomorrow", "compare", "forecast",
+    "predict", "please", "from", "revenue", "load", "factor",
+)
+
+
+def detect_lang(text: str) -> str:
+    """Detect the query language ('vi' or 'en') so the answer matches it."""
+    t = (text or "").lower()
+    if _VI_CHARS_RE.search(t):
+        return "vi"
+    if any(h in t for h in _VI_HINTS):
+        return "vi"
+    words = set(re.findall(r"[a-z]+", t))
+    return "en" if len(words & set(_EN_HINTS)) >= 2 else "vi"
+
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
@@ -1576,12 +1608,18 @@ async def generate_report(state: AgentState) -> dict:
     price_comp = state.get("price_comparison_result")
     adjusted_pred = state.get("adjusted_prediction_result")
 
+    response_language = (
+        "TIẾNG VIỆT (Vietnamese)" if detect_lang(state.get("user_query", "")) == "vi"
+        else "ENGLISH (tiếng Anh)"
+    )
+
     if state.get("error") or not flight:
         error_msg = state.get('error') or 'Không tìm thấy dữ liệu chuyến bay phù hợp trong cơ sở dữ liệu.'
         prompt = load_agent_prompt(
             "report_agent_error.md",
             user_query=state['user_query'],
-            error_status=error_msg
+            error_status=error_msg,
+            response_language=response_language
         )
     else:
         # Build context sections based on available data (support aggregate)
@@ -1675,7 +1713,8 @@ async def generate_report(state: AgentState) -> dict:
         prompt = load_agent_prompt(
             "report_agent_success.md",
             user_query=state['user_query'],
-            data_context=data_context
+            data_context=data_context,
+            response_language=response_language
         )
 
     thinking = "Đang phân tích dữ liệu và lập luận..."
@@ -2117,6 +2156,109 @@ def route_after_tools(state: AgentState) -> str:
 
 # ── Helper Functions ──────────────────────────────────────────────────────────
 
+# UI strings for the code-built report markdown, keyed by response language.
+_L10N = {
+    "vi": {
+        "route_report_title": "### Báo cáo Tổng quan Chặng bay Vietjet {route} ngày {date}",
+        "total_flights": "\n- **Tổng số chuyến bay:** {n} chuyến",
+        "avg_price_route": "- **Giá vé trung bình thực tế Vietjet:** {x:,.0f} VND",
+        "avg_lf": "- **Tỷ lệ lấp đầy trung bình:** {x:.1f}%",
+        "network_report_title": "### Báo cáo Tổng quan Hoạt động Vietjet ngày {date}",
+        "total_flights_today": "\n- **Tổng số chuyến bay hôm nay:** {n} chuyến",
+        "avg_price_network": "- **Giá vé trung bình thực tế toàn mạng:** {x:,.0f} VND",
+        "route_breakdown": "\n#### Phân bổ theo chặng bay hôm nay:",
+        "route_line": "- **{route}:** {n} chuyến (Giá TB: {x:,.0f} VND, LF: {lf:.1f}%)",
+        "more_routes": "*và {n} chặng bay khác...*",
+        "competitor_table": "\n#### Bảng so sánh giá vé đối thủ (Bamboo/Vietnam Airlines)",
+        "adj_table_title": "\n#### Đề xuất giá vé theo từng chuyến bay (đã điều chỉnh cạnh tranh)",
+        "adj_table_header": "| Chuyến bay | Giá hiện tại (VND) | Eco đề xuất (VND) | Chênh lệch Eco vs giá đề xuất | Deluxe (VND) | SkyBoss (VND) |",
+        "ml_table_title": "\n#### Dự báo giá vé theo từng chuyến bay (mô hình Machine Learning)",
+        "ml_table_header": "| Chuyến bay | Giá hiện tại (VND) | Eco dự báo (VND) | Chênh lệch Eco vs giá dự báo | Deluxe (VND) | SkyBoss (VND) |",
+        "more_flights": "*và {n} chuyến bay Vietjet khác...*",
+        "note_delta": "\n*Cột chênh lệch so sánh giá thực tế hiện tại với giá mô hình đưa ra — không phải biến động giá thị trường.*",
+        "note_anomaly": "*N/A / ⚠ ở cột giá hiện tại: chưa có dữ liệu booking hoặc giá thấp bất thường (< {floor:,.0f} VND) — đã loại khỏi giá trung bình và cột chênh lệch.*",
+        "note_inversion": "*⚠ ở cuối dòng: hạng vé cao có giá dự báo thấp hơn hạng dưới (SkyBoss < Deluxe hoặc Deluxe < Eco) — cần kiểm tra lại dữ liệu đầu vào hoặc mô hình.*",
+        "summary_agg": "\n**Tóm tắt phân tích:** {s}",
+        "flight_report_title": "### Báo cáo Phân tích Chuyến bay Vietjet {no}",
+        "adj_class_title": "\n#### Đề xuất giá vé theo hạng (đã điều chỉnh cạnh tranh)",
+        "adj_class_header": "| Hạng vé | Giá đề xuất (VND) | Gốc dự báo ML (VND) | So với giá hiện tại ({cls}) |",
+        "ml_class_title": "\n#### Dự báo giá vé theo hạng (mô hình Machine Learning)",
+        "ml_class_header": "| Hạng vé | Giá dự báo (VND) | So với giá hiện tại ({cls}) |",
+        "note_inversion_single": "\n*⚠ Hạng vé cao có giá thấp hơn hạng dưới — cần kiểm tra lại dữ liệu đầu vào hoặc mô hình.*",
+        "adjust_reason": "\n- **Lý do điều chỉnh:** {s}",
+        "summary": "\n**Tóm tắt:** {s}",
+        "sec_assessment": "\n#### 1. Đánh giá hiện trạng\n{s}",
+        "sec_competitor": "\n#### 2. Phân tích cạnh tranh\n{s}",
+        "sec_math": "\n#### 3. Cơ sở toán học\n{s}",
+        "sec_recommendation": "\n#### 4. Khuyến nghị",
+        "rec_price": "- **Giá đề xuất:** **{x:,.0f} VND**",
+        "rec_change": "- **Thay đổi:** {s}",
+        "increase": "Tăng {x:,.0f} VND",
+        "decrease": "Giảm {x:,.0f} VND",
+        "unchanged": "Giữ nguyên",
+        "confidence": "- **Độ tin cậy:** {s}",
+        "confidence_map": {"high": "Cao", "medium": "Trung bình", "low": "Thấp"},
+        "risk_title": "\n#### Yếu tố rủi ro",
+        "action_title": "\n#### Hành động đề xuất",
+        "delta_up": "▲ Tăng",
+        "delta_down": "▼ Giảm",
+        "delta_anomalous": "— (giá hiện tại bất thường)",
+        "fallback_summary": "Không thể kết nối với máy chủ AI (vLLM) để nhận phân tích chi tiết. Dưới đây là dữ liệu tổng hợp trực tiếp từ các tác tử chuyên biệt (chế độ dự phòng).",
+        "scipy_block": "\n\n#### Đề xuất tối ưu (SciPy)\n- **Giá tối ưu khuyến nghị:** **{p:,.0f} VND** ({pct:+.1f}%)\n- **Doanh thu dự kiến thay đổi:** {rev:+.1f}%\n- **Khuyến nghị:** {rec}",
+        "keep_current": "Giữ nguyên giá hiện tại.",
+    },
+    "en": {
+        "route_report_title": "### Vietjet Route Overview Report {route} — {date}",
+        "total_flights": "\n- **Total flights:** {n}",
+        "avg_price_route": "- **Average actual Vietjet fare:** {x:,.0f} VND",
+        "avg_lf": "- **Average load factor:** {x:.1f}%",
+        "network_report_title": "### Vietjet Network Overview Report — {date}",
+        "total_flights_today": "\n- **Total flights today:** {n}",
+        "avg_price_network": "- **Network-wide average actual fare:** {x:,.0f} VND",
+        "route_breakdown": "\n#### Breakdown by route today:",
+        "route_line": "- **{route}:** {n} flights (avg fare: {x:,.0f} VND, LF: {lf:.1f}%)",
+        "more_routes": "*and {n} more routes...*",
+        "competitor_table": "\n#### Competitor fare comparison (Bamboo/Vietnam Airlines)",
+        "adj_table_title": "\n#### Recommended fares per flight (competition-adjusted)",
+        "adj_table_header": "| Flight | Current price (VND) | Recommended Eco (VND) | Eco gap vs recommendation | Deluxe (VND) | SkyBoss (VND) |",
+        "ml_table_title": "\n#### Forecast fares per flight (Machine Learning model)",
+        "ml_table_header": "| Flight | Current price (VND) | Forecast Eco (VND) | Eco gap vs forecast | Deluxe (VND) | SkyBoss (VND) |",
+        "more_flights": "*and {n} more Vietjet flights...*",
+        "note_delta": "\n*The gap column compares the current actual price with the model's price — it is not market price movement.*",
+        "note_anomaly": "*N/A / ⚠ in the current-price column: missing booking data or abnormally low price (< {floor:,.0f} VND) — excluded from averages and the gap column.*",
+        "note_inversion": "*⚠ at end of row: a higher fare class is priced below a lower one (SkyBoss < Deluxe or Deluxe < Eco) — check the input data or the model.*",
+        "summary_agg": "\n**Analysis summary:** {s}",
+        "flight_report_title": "### Vietjet Flight Analysis Report {no}",
+        "adj_class_title": "\n#### Recommended fares by class (competition-adjusted)",
+        "adj_class_header": "| Fare class | Recommended (VND) | Original ML forecast (VND) | vs current price ({cls}) |",
+        "ml_class_title": "\n#### Forecast fares by class (Machine Learning model)",
+        "ml_class_header": "| Fare class | Forecast (VND) | vs current price ({cls}) |",
+        "note_inversion_single": "\n*⚠ A higher fare class is priced below a lower one — check the input data or the model.*",
+        "adjust_reason": "\n- **Adjustment reason:** {s}",
+        "summary": "\n**Summary:** {s}",
+        "sec_assessment": "\n#### 1. Current assessment\n{s}",
+        "sec_competitor": "\n#### 2. Competitive analysis\n{s}",
+        "sec_math": "\n#### 3. Mathematical basis\n{s}",
+        "sec_recommendation": "\n#### 4. Recommendation",
+        "rec_price": "- **Recommended price:** **{x:,.0f} VND**",
+        "rec_change": "- **Change:** {s}",
+        "increase": "Increase {x:,.0f} VND",
+        "decrease": "Decrease {x:,.0f} VND",
+        "unchanged": "Keep unchanged",
+        "confidence": "- **Confidence:** {s}",
+        "confidence_map": {"high": "High", "medium": "Medium", "low": "Low"},
+        "risk_title": "\n#### Risk factors",
+        "action_title": "\n#### Recommended actions",
+        "delta_up": "▲ Up",
+        "delta_down": "▼ Down",
+        "delta_anomalous": "— (anomalous current price)",
+        "fallback_summary": "Unable to reach the AI server (vLLM) for detailed analysis. Below is data aggregated directly from the specialist agents (fallback mode).",
+        "scipy_block": "\n\n#### Optimization recommendation (SciPy)\n- **Recommended optimal price:** **{p:,.0f} VND** ({pct:+.1f}%)\n- **Expected revenue change:** {rev:+.1f}%\n- **Recommendation:** {rec}",
+        "keep_current": "Keep the current price.",
+    },
+}
+
+
 # Fares below this floor are treated as data anomalies (missing/partial booking
 # data), not real prices: excluded from deltas and flagged in tables.
 PRICE_FLOOR_VND = float(os.getenv("PRICE_FLOOR_VND", "100000"))
@@ -2143,8 +2285,9 @@ def _class_order_warning(classes: dict) -> bool:
     return bool((eco and deluxe and deluxe < eco) or (deluxe and skyboss and skyboss < deluxe))
 
 
-def _fmt_delta(new_price: float, base_price: float) -> str:
+def _fmt_delta(new_price: float, base_price: float, lang: str = "vi") -> str:
     """Format an absolute + percentage price delta cell for markdown tables."""
+    L = _L10N.get(lang, _L10N["vi"])
     try:
         new_price = float(new_price or 0)
         base_price = float(base_price or 0)
@@ -2154,19 +2297,21 @@ def _fmt_delta(new_price: float, base_price: float) -> str:
         return "—"
     if base_price < PRICE_FLOOR_VND:
         # A % vs an anomalous base (e.g. 54,000 VND) would read +300% and mislead
-        return "— (giá hiện tại bất thường)"
+        return L["delta_anomalous"]
     diff = new_price - base_price
     pct = diff / base_price * 100.0
     if abs(pct) < 0.05:
-        return "Giữ nguyên"
-    arrow = "▲ Tăng" if diff > 0 else "▼ Giảm"
+        return L["unchanged"]
+    arrow = L["delta_up"] if diff > 0 else L["delta_down"]
     return f"{arrow} {abs(diff):,.0f} VND ({pct:+.1f}%)"
 
 
 def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = None, price_comparison: dict | None = None, adjusted_prediction: dict | None = None, state: dict | None = None) -> str:
     """Convert structured JSON report to display-ready markdown dynamically based on query intent."""
     query_lower = state.get("user_query", "").lower() if state else ""
-    
+    lang = detect_lang(state.get("user_query", "")) if state else "vi"
+    L = _L10N.get(lang, _L10N["vi"])
+
     # Intent detection
     has_comp_intent = any(kw in query_lower for kw in ["đối thủ", "so sánh", "hãng khác", "bamboo", "vietnam airlines", "compare", "competitor"]) or (state and state.get("comparison_intent"))
     has_opt_intent = any(kw in query_lower for kw in ["tối ưu", "optimize", "doanh thu", "scipy"])
@@ -2180,26 +2325,26 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
         parsed_route = flight.get("parsed_route")
         
         if parsed_route:
-            parts = [f"### Báo cáo Tổng quan Chặng bay Vietjet {parsed_route} ngày {target_date}"]
-            parts.append(f"\n- **Tổng số chuyến bay:** {flight['total_flights']} chuyến")
-            parts.append(f"- **Giá vé trung bình thực tế Vietjet:** {flight['avg_price']:,.0f} VND")
-            parts.append(f"- **Tỷ lệ lấp đầy trung bình:** {flight['avg_lf']*100:.1f}%")
+            parts = [L["route_report_title"].format(route=parsed_route, date=target_date)]
+            parts.append(L["total_flights"].format(n=flight['total_flights']))
+            parts.append(L["avg_price_route"].format(x=flight['avg_price']))
+            parts.append(L["avg_lf"].format(x=flight['avg_lf'] * 100))
         else:
-            parts = [f"### Báo cáo Tổng quan Hoạt động Vietjet ngày {target_date}"]
-            parts.append(f"\n- **Tổng số chuyến bay hôm nay:** {flight['total_flights']} chuyến")
-            parts.append(f"- **Giá vé trung bình thực tế toàn mạng:** {flight['avg_price']:,.0f} VND")
-            parts.append(f"- **Tỷ lệ lấp đầy trung bình:** {flight['avg_lf']*100:.1f}%")
-            
+            parts = [L["network_report_title"].format(date=target_date)]
+            parts.append(L["total_flights_today"].format(n=flight['total_flights']))
+            parts.append(L["avg_price_network"].format(x=flight['avg_price']))
+            parts.append(L["avg_lf"].format(x=flight['avg_lf'] * 100))
+
             if flight.get("routes"):
-                parts.append("\n#### Phân bổ theo chặng bay hôm nay:")
+                parts.append(L["route_breakdown"])
                 for r in flight["routes"][:5]:
-                    parts.append(f"- **{r['route']}:** {r['flight_cnt']} chuyến (Giá TB: {r['avg_price']:,.0f} VND, LF: {r['avg_lf']*100:.1f}%)")
+                    parts.append(L["route_line"].format(route=r['route'], n=r['flight_cnt'], x=r['avg_price'], lf=r['avg_lf'] * 100))
                 if len(flight["routes"]) > 5:
-                    parts.append(f"*và {len(flight['routes']) - 5} chặng bay khác...*")
+                    parts.append(L["more_routes"].format(n=len(flight['routes']) - 5))
 
         # Competitor pricing section
         if (show_all or has_comp_intent) and price_comparison and price_comparison.get("comparison_table"):
-            parts.append(f"\n#### Bảng so sánh giá vé đối thủ (Bamboo/Vietnam Airlines)")
+            parts.append(L["competitor_table"])
             parts.append(price_comparison["comparison_table"])
 
         # ML and price adjustments sections — comparison tables so the reader
@@ -2207,12 +2352,12 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
         if show_all or has_ml_intent:
             agg_preds = None
             if adjusted_prediction and adjusted_prediction.get("predictions"):
-                parts.append(f"\n#### Đề xuất giá vé theo từng chuyến bay (đã điều chỉnh cạnh tranh)")
-                parts.append("| Chuyến bay | Giá hiện tại (VND) | Eco đề xuất (VND) | Chênh lệch Eco vs giá đề xuất | Deluxe (VND) | SkyBoss (VND) |")
+                parts.append(L["adj_table_title"])
+                parts.append(L["adj_table_header"])
                 agg_preds = adjusted_prediction["predictions"]
             elif ml_pred and ml_pred.get("predictions"):
-                parts.append(f"\n#### Dự báo giá vé theo từng chuyến bay (mô hình Machine Learning)")
-                parts.append("| Chuyến bay | Giá hiện tại (VND) | Eco dự báo (VND) | Chênh lệch Eco vs giá dự báo | Deluxe (VND) | SkyBoss (VND) |")
+                parts.append(L["ml_table_title"])
+                parts.append(L["ml_table_header"])
                 agg_preds = ml_pred["predictions"]
 
             if agg_preds:
@@ -2228,24 +2373,24 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
                     inversion = _class_order_warning(classes)
                     has_class_inversion = has_class_inversion or inversion
                     parts.append(
-                        f"| **VJ{str(p['flight_no']).replace('VJ', '')}** | {_fmt_price_cell(cur)} | {eco:,.0f} | {_fmt_delta(eco, cur)} "
+                        f"| **VJ{str(p['flight_no']).replace('VJ', '')}** | {_fmt_price_cell(cur)} | {eco:,.0f} | {_fmt_delta(eco, cur, lang)} "
                         f"| {classes.get('Deluxe', 0):,.0f} | {classes.get('SkyBoss', 0):,.0f}{' ⚠' if inversion else ''} |"
                     )
                 if len(agg_preds) > 10:
-                    parts.append(f"*và {len(agg_preds) - 10} chuyến bay Vietjet khác...*")
-                parts.append("\n*Cột chênh lệch so sánh giá thực tế hiện tại với giá mô hình đưa ra — không phải biến động giá thị trường.*")
+                    parts.append(L["more_flights"].format(n=len(agg_preds) - 10))
+                parts.append(L["note_delta"])
                 if has_anomaly:
-                    parts.append(f"*N/A / ⚠ ở cột giá hiện tại: chưa có dữ liệu booking hoặc giá thấp bất thường (< {PRICE_FLOOR_VND:,.0f} VND) — đã loại khỏi giá trung bình và cột chênh lệch.*")
+                    parts.append(L["note_anomaly"].format(floor=PRICE_FLOOR_VND))
                 if has_class_inversion:
-                    parts.append("*⚠ ở cuối dòng: hạng vé cao có giá dự báo thấp hơn hạng dưới (SkyBoss < Deluxe hoặc Deluxe < Eco) — cần kiểm tra lại dữ liệu đầu vào hoặc mô hình.*")
+                    parts.append(L["note_inversion"])
 
         if report and report.get("executive_summary"):
-            parts.append(f"\n**Tóm tắt phân tích:** {report['executive_summary']}")
-            
+            parts.append(L["summary_agg"].format(s=report['executive_summary']))
+
         return "\n".join(parts)
 
     # Original single flight markdown formatter
-    parts = [f"### Báo cáo Phân tích Chuyến bay Vietjet {flight['flight_no']}"]
+    parts = [L["flight_report_title"].format(no=flight['flight_no'])]
 
     # Show prediction / adjustments if general query or prediction/competitor intent
     if show_all or has_ml_intent or has_comp_intent:
@@ -2253,11 +2398,11 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
         current_class = flight.get("fare_family", "Eco")
         # Delta vs current price is only meaningful for the same fare class
         def _delta_for(cls: str, proposed: float) -> str:
-            return _fmt_delta(proposed, current_price) if cls == current_class else "—"
+            return _fmt_delta(proposed, current_price, lang) if cls == current_class else "—"
 
         if adjusted_prediction:
-            parts.append(f"\n#### Đề xuất giá vé theo hạng (đã điều chỉnh cạnh tranh)")
-            parts.append(f"| Hạng vé | Giá đề xuất (VND) | Gốc dự báo ML (VND) | So với giá hiện tại ({current_class}) |")
+            parts.append(L["adj_class_title"])
+            parts.append(L["adj_class_header"].format(cls=current_class))
             parts.append("| :--- | ---: | ---: | :--- |")
             for cls in ("Eco", "Deluxe", "SkyBoss"):
                 proposed = adjusted_prediction.get(cls, 0)
@@ -2265,62 +2410,62 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
                     f"| **{cls}** | {proposed:,.0f} | {(ml_pred or {}).get(cls, 0):,.0f} | {_delta_for(cls, proposed)} |"
                 )
             if _class_order_warning(adjusted_prediction):
-                parts.append("\n*⚠ Hạng vé cao có giá đề xuất thấp hơn hạng dưới — cần kiểm tra lại dữ liệu đầu vào hoặc mô hình.*")
+                parts.append(L["note_inversion_single"])
             if adjusted_prediction.get('reason'):
-                parts.append(f"\n- **Lý do điều chỉnh:** {adjusted_prediction.get('reason')}")
+                parts.append(L["adjust_reason"].format(s=adjusted_prediction.get('reason')))
         elif ml_pred:
-            parts.append(f"\n#### Dự báo giá vé theo hạng (mô hình Machine Learning)")
-            parts.append(f"| Hạng vé | Giá dự báo (VND) | So với giá hiện tại ({current_class}) |")
+            parts.append(L["ml_class_title"])
+            parts.append(L["ml_class_header"].format(cls=current_class))
             parts.append("| :--- | ---: | :--- |")
             for cls in ("Eco", "Deluxe", "SkyBoss", "GDS"):
                 if cls in ml_pred:
                     label = "GDS (Business)" if cls == "GDS" else cls
                     parts.append(f"| **{label}** | {ml_pred.get(cls, 0):,.0f} | {_delta_for(cls, ml_pred.get(cls, 0))} |")
             if _class_order_warning(ml_pred):
-                parts.append("\n*⚠ Hạng vé cao có giá dự báo thấp hơn hạng dưới — cần kiểm tra lại dữ liệu đầu vào hoặc mô hình.*")
+                parts.append(L["note_inversion_single"])
 
     # Executive Summary (always show if available)
     if report.get("executive_summary"):
-        parts.append(f"\n**Tóm tắt:** {report['executive_summary']}")
+        parts.append(L["summary"].format(s=report['executive_summary']))
 
     # Detailed sections (only show if not empty and query matches intent or show_all)
     if (show_all or has_opt_intent) and report.get("current_assessment"):
-        parts.append(f"\n#### 1. Đánh giá hiện trạng\n{report['current_assessment']}")
+        parts.append(L["sec_assessment"].format(s=report['current_assessment']))
 
     if (show_all or has_comp_intent) and report.get("competitor_analysis"):
-        parts.append(f"\n#### 2. Phân tích cạnh tranh\n{report['competitor_analysis']}")
+        parts.append(L["sec_competitor"].format(s=report['competitor_analysis']))
 
     if (show_all or has_opt_intent) and report.get("mathematical_basis"):
-        parts.append(f"\n#### 3. Cơ sở toán học\n{report['mathematical_basis']}")
+        parts.append(L["sec_math"].format(s=report['mathematical_basis']))
 
     # Recommended Price & Recommendations
     if report.get("recommended_price"):
-        confidence_text = {"high": "Cao", "medium": "Trung bình", "low": "Thấp"}.get(report.get("confidence_level", "medium"), "Trung bình")
-        parts.append(f"\n#### 4. Khuyến nghị")
-        parts.append(f"- **Giá đề xuất:** **{report['recommended_price']:,.0f} VND**")
+        confidence_text = L["confidence_map"].get(report.get("confidence_level", "medium"), L["confidence_map"]["medium"])
+        parts.append(L["sec_recommendation"])
+        parts.append(L["rec_price"].format(x=report['recommended_price']))
         if flight.get("price"):
             price_diff = report["recommended_price"] - flight["price"]
-            diff_str = f"Tăng {price_diff:,.0f} VND" if price_diff > 0 else f"Giảm {abs(price_diff):,.0f} VND" if price_diff < 0 else "Giữ nguyên"
+            diff_str = L["increase"].format(x=price_diff) if price_diff > 0 else L["decrease"].format(x=abs(price_diff)) if price_diff < 0 else L["unchanged"]
             if report.get("price_change_pct"):
-                parts.append(f"- **Thay đổi:** {diff_str} ({report['price_change_pct']:+.1f}%)")
+                parts.append(L["rec_change"].format(s=f"{diff_str} ({report['price_change_pct']:+.1f}%)"))
             else:
-                parts.append(f"- **Thay đổi:** {diff_str}")
+                parts.append(L["rec_change"].format(s=diff_str))
         elif report.get("price_change_pct"):
-            parts.append(f"- **Thay đổi:** {report['price_change_pct']:+.1f}%")
-        parts.append(f"- **Độ tin cậy:** {confidence_text}")
+            parts.append(L["rec_change"].format(s=f"{report['price_change_pct']:+.1f}%"))
+        parts.append(L["confidence"].format(s=confidence_text))
 
     if (show_all or has_opt_intent) and report.get("risk_factors"):
         # Filter empty items
         risks = [r for r in report["risk_factors"] if r.strip()]
         if risks:
-            parts.append("\n#### Yếu tố rủi ro")
+            parts.append(L["risk_title"])
             for r in risks:
                 parts.append(f"- {r}")
 
     if (show_all or has_opt_intent) and report.get("action_items"):
         actions = [a for a in report["action_items"] if a.strip()]
         if actions:
-            parts.append("\n#### Hành động đề xuất")
+            parts.append(L["action_title"])
             for a in actions:
                 parts.append(f"- {a}")
 
@@ -2329,22 +2474,20 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
 
 def _fallback_report(flight: dict, opt: dict | None, comp: list | None, ml_pred: dict | None = None, price_comparison: dict | None = None, adjusted_prediction: dict | None = None, state: dict | None = None) -> str:
     """Fallback report when vLLM is offline."""
-    dummy_report = {
-        "executive_summary": "Không thể kết nối với máy chủ AI (vLLM) để nhận phân tích chi tiết. Dưới đây là dữ liệu tổng hợp trực tiếp từ các tác tử chuyên biệt (chế độ dự phòng)."
-    }
-    
+    lang = detect_lang(state.get("user_query", "")) if state else "vi"
+    L = _L10N.get(lang, _L10N["vi"])
+    dummy_report = {"executive_summary": L["fallback_summary"]}
+
     body = _format_report_markdown(dummy_report, flight, ml_pred, price_comparison, adjusted_prediction, state)
-    
+
     if flight.get("is_aggregate") != True and opt:
         opt_price = opt['optimal_price'] if opt else flight['price']
         opt_pct = opt['price_change_pct'] if opt else 0
         opt_rev = opt['revenue_delta_pct'] if opt else 0
-        body += f"""
-
-#### Đề xuất tối ưu (SciPy)
-- **Giá tối ưu khuyến nghị:** **{opt_price:,.0f} VND** ({opt_pct:+.1f}%)
-- **Doanh thu dự kiến thay đổi:** {opt_rev:+.1f}%
-- **Khuyến nghị:** {opt.get('recommendation', 'Giữ nguyên giá hiện tại.')}"""
+        body += L["scipy_block"].format(
+            p=opt_price, pct=opt_pct, rev=opt_rev,
+            rec=opt.get('recommendation', L["keep_current"])
+        )
 
     return body
 
