@@ -35,7 +35,7 @@ SIMILARITY_THRESHOLD = float(os.getenv("CACHE_SIMILARITY_THRESHOLD", "0.92"))
 
 # NVIDIA NIM Embeddings Config
 NIM_EMBEDDING_URL = os.getenv("NIM_EMBEDDING_URL")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nvidia/embed-qa-4")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nvidia/nv-embedqa-e5-v5")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 
 

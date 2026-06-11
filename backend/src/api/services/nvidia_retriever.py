@@ -13,11 +13,11 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 NIM_EMBEDDING_URL = os.getenv("NIM_EMBEDDING_URL", "")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nvidia/embed-qa-4")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nvidia/nv-embedqa-e5-v5")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 
 NIM_RERANK_URL = os.getenv("NIM_RERANK_URL", "")
-RERANK_MODEL = os.getenv("RERANK_MODEL", "nvidia/reranking-nv-embed-qa-4")
+RERANK_MODEL = os.getenv("RERANK_MODEL", "nvidia/nv-rerankqa-mistral-4b-v3")
 
 
 @lru_cache(maxsize=1)
