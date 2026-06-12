@@ -251,12 +251,16 @@ class SemanticCache:
         client = get_embeddings_client()
         return client.embed_query(text)
 
-    def get(self, query: str, route: str = None) -> dict | None:
+    def get(self, query: str, route: str = None, lang: str = "vi") -> dict | None:
         """
         Try to retrieve a cached response for the query.
-        
+
         Returns cached response dict or None (cache miss).
         Checks Layer 1 (exact) then Layer 2 (semantic).
+        `lang` partitions the semantic cache: the multilingual embedding model
+        scores "SGN-HAN fares today" ≈ "giá vé SGN-HAN hôm nay" above the
+        similarity threshold, which used to serve Vietnamese answers to
+        English questions.
         """
         if not query or not query.strip():
             return None
@@ -295,6 +299,10 @@ class SemanticCache:
                 self._qdrant_models.FieldCondition(
                     key="date_tag",
                     match=self._qdrant_models.MatchValue(value=date_tag)
+                ),
+                self._qdrant_models.FieldCondition(
+                    key="lang",
+                    match=self._qdrant_models.MatchValue(value=lang or "vi")
                 ),
             ]
             if effective_route:
@@ -361,7 +369,7 @@ class SemanticCache:
 
         return None  # Cache miss
 
-    def put(self, query: str, response: dict, route: str = None) -> None:
+    def put(self, query: str, response: dict, route: str = None, lang: str = "vi") -> None:
         """
         Store a response in both cache layers.
         
@@ -413,6 +421,7 @@ class SemanticCache:
                             "route": (effective_route or "").upper(),
                             "flight_no": self._parse_flight_no(query),
                             "date_tag": self._parse_date_tag(query),
+                            "lang": lang or "vi",
                             "timestamp": now,
                         }
                     )

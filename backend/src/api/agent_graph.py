@@ -45,11 +45,25 @@ _VI_HINTS = (
     "cho toi", "bao nhieu", "doi thu", "du bao", "du doan", "toi uu",
     "lap day", "so sanh", "khuyen nghi", "hang ve",
 )
-_EN_HINTS = (
-    "the", "what", "how", "give", "show", "me", "price", "prices", "fare",
-    "fares", "flight", "flights", "today", "tomorrow", "compare", "forecast",
-    "predict", "please", "from", "revenue", "load", "factor",
-)
+# Common English function/domain words — one short English question ("Why
+# VJ1128 increase 155%?") must already score here, the old 2-hit threshold
+# over a narrow list sent such queries to Vietnamese answers
+_EN_HINTS = frozenset((
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "do", "does",
+    "did", "should", "would", "could", "can", "will", "shall", "may", "might",
+    "what", "why", "how", "when", "where", "which", "who", "whose",
+    "i", "you", "we", "they", "it", "this", "that", "these", "those",
+    "my", "your", "our", "their", "its", "me", "us",
+    "of", "in", "on", "at", "to", "for", "with", "by", "about", "vs", "versus",
+    "and", "or", "not", "no", "yes", "if", "but", "than", "then",
+    "give", "show", "tell", "explain", "need", "want", "get", "make", "check",
+    "lower", "raise", "increase", "decrease", "adjust", "apply", "keep",
+    "price", "prices", "pricing", "fare", "fares", "flight", "flights",
+    "today", "tomorrow", "weekend", "week", "day", "date",
+    "compare", "comparison", "forecast", "predict", "prediction",
+    "please", "from", "revenue", "load", "factor", "competitor", "competitors",
+    "overpriced", "underpriced", "expensive", "cheap", "best", "much", "many",
+))
 
 
 def detect_lang(text: str) -> str:
@@ -57,10 +71,11 @@ def detect_lang(text: str) -> str:
     t = (text or "").lower()
     if _VI_CHARS_RE.search(t):
         return "vi"
-    if any(h in t for h in _VI_HINTS):
-        return "vi"
+    vi_hits = sum(1 for h in _VI_HINTS if h in t)
     words = set(re.findall(r"[a-z]+", t))
-    return "en" if len(words & set(_EN_HINTS)) >= 2 else "vi"
+    en_hits = len(words & _EN_HINTS)
+    # Majority vote; ambiguous queries default to vi (primary user base)
+    return "en" if en_hits > vi_hits else "vi"
 
 # Nemotron occasionally leaks CJK tokens into Vietnamese answers
 # (e.g. "dự báo chặng bay受影响") — strip them from user-facing text
@@ -1834,7 +1849,9 @@ async def generate_report(state: AgentState) -> dict:
             prompt=prompt,
             schema=PRICING_REPORT_SCHEMA if flight else None,
             temperature=0.3,
-            max_tokens=3072
+            # Reasoning model: thinking shares the completion budget — 3072 was
+            # regularly exhausted on aggregate contexts, truncating the JSON
+            max_tokens=5120
         )
         latency_ms = int((time.time() - start_time) * 1000)
 
@@ -1898,7 +1915,10 @@ async def generate_report(state: AgentState) -> dict:
             }
         else:
             detail = state.get('error') or str(ex) or 'Lỗi hệ thống hoặc vLLM offline.'
-            message = f"Xin lỗi, tôi gặp lỗi khi xử lý câu hỏi của bạn. Chi tiết: {detail}"
+            if detect_lang(state.get("user_query", "")) == "en":
+                message = f"Sorry, I ran into an error while processing your question. Details: {detail}"
+            else:
+                message = f"Xin lỗi, tôi gặp lỗi khi xử lý câu hỏi của bạn. Chi tiết: {detail}"
             thinking = "vLLM offline hoặc gặp sự cố khi xử lý câu hỏi chung."
             report = None
 
@@ -2915,7 +2935,7 @@ NODE_STATUS_LABELS = {
 def _blocked_response(reason: str, severity: str, user_query: str) -> dict:
     return {
         "thinking": "Guardrails: Input blocked.",
-        "message": f"Cảnh báo: {reason}",
+        "message": f"{'Warning' if detect_lang(user_query) == 'en' else 'Cảnh báo'}: {reason}",
         "tools_called": [{"name": "Guardrails (Input)", "args": user_query[:100], "result": reason}],
         "report": None,
         "action": {"type": "none"},
@@ -2969,11 +2989,16 @@ async def run_copilot_graph_stream(user_query: str, session_id=None):
     # ── Layer 2: Semantic Cache Check ───────────────────────────
     cache = get_cache()
     parsed_route = seed_state.get("parsed_route") or cache._parse_route(cache_query)
+    query_lang = detect_lang(effective_query)
     # cache.get performs a synchronous HTTP call to the NIM embedding service —
     # run it in a worker thread so the FastAPI event loop is not blocked
-    cached = await asyncio.to_thread(cache.get, cache_query, parsed_route)
+    cached = await asyncio.to_thread(cache.get, cache_query, parsed_route, query_lang)
     if cached:
         logger.info(f"Cache hit for query: '{cache_query[:50]}...' (route: {parsed_route})")
+        # Sanitize at read time too — entries cached before the CJK filter
+        # was added would otherwise replay leaked tokens verbatim
+        if isinstance(cached.get("message"), str):
+            cached["message"] = strip_cjk(cached["message"])
         yield {"type": "result", "data": cached}
         return
 
@@ -3074,7 +3099,7 @@ async def run_copilot_graph_stream(user_query: str, session_id=None):
 
         # Store in cache (embedding call runs off the event loop)
         route = flight.get("route", "")
-        await asyncio.to_thread(cache.put, cache_query, response, route)
+        await asyncio.to_thread(cache.put, cache_query, response, route, query_lang)
 
         # Remember this turn's resolved target for multi-turn follow-ups
         _update_session_context(session_id, result)
