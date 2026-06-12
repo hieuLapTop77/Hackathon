@@ -1503,6 +1503,9 @@ def run_price_adjustment(state: AgentState) -> dict:
                 new_classes["Eco"] = new_eco
                 new_classes["Deluxe"] = round(new_eco * DELUXE_PROPORTION, -3)
                 new_classes["SkyBoss"] = round(new_eco * SKYBOSS_PROPORTION, -3)
+                # Prices were recomputed from fixed ratios — the ML ladder
+                # calibration flag no longer describes these values
+                new_classes.pop("ladder_adjusted", None)
                 adjustments_made += 1
                 
             adjusted_preds.append({
@@ -1554,7 +1557,10 @@ def run_price_adjustment(state: AgentState) -> dict:
             new_classes["Eco"] = new_eco
             new_classes["Deluxe"] = round(new_eco * DELUXE_PROPORTION, -3)
             new_classes["SkyBoss"] = round(new_eco * SKYBOSS_PROPORTION, -3)
-            
+            # Prices were recomputed from fixed ratios — the ML ladder
+            # calibration flag no longer describes these values
+            new_classes.pop("ladder_adjusted", None)
+
         adjusted_data = new_classes
         adjusted_data["reason"] = reason
 
@@ -1612,6 +1618,7 @@ async def generate_report(state: AgentState) -> dict:
         "TIẾNG VIỆT (Vietnamese)" if detect_lang(state.get("user_query", "")) == "vi"
         else "ENGLISH (tiếng Anh)"
     )
+    data_context = ""
 
     if state.get("error") or not flight:
         error_msg = state.get('error') or 'Không tìm thấy dữ liệu chuyến bay phù hợp trong cơ sở dữ liệu.'
@@ -1736,6 +1743,7 @@ async def generate_report(state: AgentState) -> dict:
         if flight:
             try:
                 report = json.loads(content)
+                report = _validate_summary(report, data_context, flight, ml_pred, adjusted_pred, state)
                 message = _format_report_markdown(report, flight, ml_pred, price_comp, adjusted_pred, state)
             except json.JSONDecodeError:
                 logger.warning("JSON parse failed, using raw LLM output")
@@ -2178,6 +2186,13 @@ _L10N = {
         "note_delta": "\n*Cột chênh lệch so sánh giá thực tế hiện tại với giá mô hình đưa ra — không phải biến động giá thị trường.*",
         "note_anomaly": "*N/A / ⚠ ở cột giá hiện tại: chưa có dữ liệu booking hoặc giá thấp bất thường (< {floor:,.0f} VND) — đã loại khỏi giá trung bình và cột chênh lệch.*",
         "note_inversion": "*⚠ ở cuối dòng: hạng vé cao có giá dự báo thấp hơn hạng dưới (SkyBoss < Deluxe hoặc Deluxe < Eco) — cần kiểm tra lại dữ liệu đầu vào hoặc mô hình.*",
+        "note_ladder": "*† Giá gốc mô hình dự báo thấp hơn hạng dưới, đã được nâng lên bậc tối thiểu (+5% so với hạng dưới) — cần kiểm tra lại mô hình dự báo hạng cao.*",
+        "auto_summary_prefix": "(Tóm tắt AI đã bị loại vì chứa số liệu không khớp dữ liệu — dưới đây là tóm tắt tự động từ dữ liệu.)",
+        "auto_summary_agg": "Theo dữ liệu: chênh lệch giữa giá hiện tại và giá Eco mô hình đưa ra từ {minpct:+.1f}% đến {maxpct:+.1f}% trên {m}/{n} chuyến có dữ liệu hợp lệ; giá vé trung bình thực tế {avg:,.0f} VND, tỷ lệ lấp đầy trung bình {lf:.1f}%.",
+        "auto_summary_issues": "Lưu ý: {k} chuyến có cảnh báo dữ liệu (thiếu giá hoặc thang hạng vé bất thường).",
+        "auto_summary_single": "Theo dữ liệu: giá hiện tại {price:,.0f} VND; giá Eco mô hình đưa ra {eco:,.0f} VND ({delta}).",
+        "auto_summary_single_nopred": "Theo dữ liệu: giá hiện tại {price:,.0f} VND.",
+        "system_facts_label": "**Đối chiếu hệ thống:**",
         "summary_agg": "\n**Tóm tắt phân tích:** {s}",
         "flight_report_title": "### Báo cáo Phân tích Chuyến bay Vietjet {no}",
         "adj_class_title": "\n#### Đề xuất giá vé theo hạng (đã điều chỉnh cạnh tranh)",
@@ -2227,6 +2242,13 @@ _L10N = {
         "note_delta": "\n*The gap column compares the current actual price with the model's price — it is not market price movement.*",
         "note_anomaly": "*N/A / ⚠ in the current-price column: missing booking data or abnormally low price (< {floor:,.0f} VND) — excluded from averages and the gap column.*",
         "note_inversion": "*⚠ at end of row: a higher fare class is priced below a lower one (SkyBoss < Deluxe or Deluxe < Eco) — check the input data or the model.*",
+        "note_ladder": "*† The model's raw forecast was below the lower class and was raised to the minimum ladder step (+5% over the class below) — review the premium-class model.*",
+        "auto_summary_prefix": "(The AI summary was discarded because it contained figures not found in the data — below is an automatic data-derived summary.)",
+        "auto_summary_agg": "Per the data: the gap between current prices and the model's Eco price ranges from {minpct:+.1f}% to {maxpct:+.1f}% across {m}/{n} flights with valid data; average actual fare {avg:,.0f} VND, average load factor {lf:.1f}%.",
+        "auto_summary_issues": "Note: {k} flights carry data warnings (missing price or abnormal fare-class ladder).",
+        "auto_summary_single": "Per the data: current price {price:,.0f} VND; the model's Eco price is {eco:,.0f} VND ({delta}).",
+        "auto_summary_single_nopred": "Per the data: current price {price:,.0f} VND.",
+        "system_facts_label": "**System cross-check:**",
         "summary_agg": "\n**Analysis summary:** {s}",
         "flight_report_title": "### Vietjet Flight Analysis Report {no}",
         "adj_class_title": "\n#### Recommended fares by class (competition-adjusted)",
@@ -2306,6 +2328,129 @@ def _fmt_delta(new_price: float, base_price: float, lang: str = "vi") -> str:
     return f"{arrow} {abs(diff):,.0f} VND ({pct:+.1f}%)"
 
 
+# ── Executive-summary validation ─────────────────────────────────────────────
+# Small LLMs ignore the "only quote numbers from the data" prompt rule often
+# enough that the summary can contradict the table above it. Every money-sized
+# figure in the summary must trace back to the data given to the LLM; if any
+# doesn't, the whole summary is replaced with a deterministic one built from
+# the same data as the table.
+
+_NUM_TOKEN_RE = re.compile(r"\d[\d.,]*\d|\d")
+
+
+def _extract_numbers(text: str) -> set:
+    """Parse numeric tokens ('1,190,000', '1.190.000', '28.6') into floats."""
+    nums = set()
+    for tok in _NUM_TOKEN_RE.findall(text or ""):
+        t = tok
+        if t.count(".") > 1:          # vi thousands: 1.190.000
+            t = t.replace(".", "")
+        if t.count(",") > 1:          # en thousands: 1,190,000
+            t = t.replace(",", "")
+        if "," in t and "." in t:     # 1,190,000.5 → en style
+            t = t.replace(",", "")
+        elif "," in t:
+            head, tail = t.rsplit(",", 1)
+            t = head + tail if len(tail) == 3 else head + "." + tail
+        elif "." in t:
+            head, tail = t.rsplit(".", 1)
+            t = head + tail if len(tail) == 3 else t
+        try:
+            nums.add(float(t))
+        except ValueError:
+            pass
+    return nums
+
+
+def _summary_facts(flight: dict, ml_pred: dict | None, adjusted_pred: dict | None, state: dict | None) -> str:
+    """Deterministic facts sentence built from the same data as the table."""
+    lang = detect_lang(state.get("user_query", "")) if state else "vi"
+    L = _L10N.get(lang, _L10N["vi"])
+    parts = []
+
+    preds = None
+    for src in (adjusted_pred, ml_pred):
+        if isinstance(src, dict) and src.get("predictions"):
+            preds = src["predictions"]
+            break
+
+    if flight and flight.get("is_aggregate") and preds:
+        pcts = []
+        flagged = 0
+        for p in preds:
+            cur = float(p.get("current_price") or 0)
+            classes = p.get("classes") or {}
+            eco = float(classes.get("Eco") or 0)
+            issue = False
+            if cur >= PRICE_FLOOR_VND and eco > 0:
+                pcts.append((eco - cur) / cur * 100.0)
+            else:
+                issue = True
+            if _class_order_warning(classes) or classes.get("ladder_adjusted"):
+                issue = True
+            flagged += 1 if issue else 0
+        if pcts:
+            parts.append(L["auto_summary_agg"].format(
+                minpct=min(pcts), maxpct=max(pcts), m=len(pcts), n=len(preds),
+                avg=flight.get("avg_price") or 0, lf=(flight.get("avg_lf") or 0) * 100))
+        if flagged:
+            parts.append(L["auto_summary_issues"].format(k=flagged))
+    elif flight and not flight.get("is_aggregate"):
+        cur = float(flight.get("price") or 0)
+        eco = None
+        for src in (adjusted_pred, ml_pred):
+            if isinstance(src, dict) and isinstance(src.get("Eco"), (int, float)):
+                eco = float(src["Eco"])
+                break
+        if cur > 0 and eco:
+            parts.append(L["auto_summary_single"].format(price=cur, eco=eco, delta=_fmt_delta(eco, cur, lang)))
+        elif cur > 0:
+            parts.append(L["auto_summary_single_nopred"].format(price=cur))
+
+    return " ".join(parts).strip()
+
+
+def _validate_summary(report: dict, data_context: str, flight: dict, ml_pred: dict | None, adjusted_pred: dict | None, state: dict | None) -> dict:
+    """Discard the LLM summary when it quotes money figures absent from the data."""
+    summary = (report or {}).get("executive_summary") or ""
+    if not summary or not flight:
+        return report
+
+    allowed = _extract_numbers(data_context)
+    # The data context truncates prediction lists to 5 — allow every figure
+    # from the full lists the table is built from
+    for src in (ml_pred, adjusted_pred):
+        if not isinstance(src, dict):
+            continue
+        for p in src.get("predictions", []) or []:
+            allowed.add(float(p.get("current_price") or 0))
+            for v in (p.get("classes") or {}).values():
+                if isinstance(v, (int, float)):
+                    allowed.add(float(v))
+        for cls in ("Eco", "Deluxe", "SkyBoss", "GDS"):
+            v = src.get(cls)
+            if isinstance(v, (int, float)):
+                allowed.add(float(v))
+
+    # Only money-sized figures are checked; small numbers (percentages,
+    # counts, dates) are too ambiguous to trace reliably
+    suspects = [
+        n for n in _extract_numbers(summary)
+        if n >= 10000 and not any(abs(n - a) <= max(1000.0, 0.01 * a) for a in allowed)
+    ]
+    lang = detect_lang(state.get("user_query", "")) if state else "vi"
+    L = _L10N.get(lang, _L10N["vi"])
+    facts = _summary_facts(flight, ml_pred, adjusted_pred, state)
+    if suspects:
+        logger.warning(f"Discarding LLM summary, figures not found in data: {sorted(suspects)[:5]}")
+        report["executive_summary"] = (L["auto_summary_prefix"] + " " + facts).strip()
+    elif facts and flight.get("is_aggregate"):
+        # Valid figures can still be misread (e.g. quoting the current average
+        # as the forecast) — ride the code-computed facts along as a cross-check
+        report["executive_summary"] = f"{summary.rstrip()}\n\n{L['system_facts_label']} {facts}"
+    return report
+
+
 def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = None, price_comparison: dict | None = None, adjusted_prediction: dict | None = None, state: dict | None = None) -> str:
     """Convert structured JSON report to display-ready markdown dynamically based on query intent."""
     query_lower = state.get("user_query", "").lower() if state else ""
@@ -2364,6 +2509,7 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
                 parts.append("| :--- | ---: | ---: | :--- | ---: | ---: |")
                 has_anomaly = False
                 has_class_inversion = False
+                has_ladder = False
                 for p in agg_preds[:10]:
                     cur = p.get("current_price") or 0
                     classes = p["classes"]
@@ -2372,9 +2518,12 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
                         has_anomaly = True
                     inversion = _class_order_warning(classes)
                     has_class_inversion = has_class_inversion or inversion
+                    ladder = classes.get("ladder_adjusted") or []
+                    has_ladder = has_ladder or bool(ladder)
                     parts.append(
                         f"| **VJ{str(p['flight_no']).replace('VJ', '')}** | {_fmt_price_cell(cur)} | {eco:,.0f} | {_fmt_delta(eco, cur, lang)} "
-                        f"| {classes.get('Deluxe', 0):,.0f} | {classes.get('SkyBoss', 0):,.0f}{' ⚠' if inversion else ''} |"
+                        f"| {classes.get('Deluxe', 0):,.0f}{'†' if 'Deluxe' in ladder else ''} "
+                        f"| {classes.get('SkyBoss', 0):,.0f}{'†' if 'SkyBoss' in ladder else ''}{' ⚠' if inversion else ''} |"
                     )
                 if len(agg_preds) > 10:
                     parts.append(L["more_flights"].format(n=len(agg_preds) - 10))
@@ -2383,6 +2532,8 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
                     parts.append(L["note_anomaly"].format(floor=PRICE_FLOOR_VND))
                 if has_class_inversion:
                     parts.append(L["note_inversion"])
+                if has_ladder:
+                    parts.append(L["note_ladder"])
 
         if report and report.get("executive_summary"):
             parts.append(L["summary_agg"].format(s=report['executive_summary']))
@@ -2417,12 +2568,15 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
             parts.append(L["ml_class_title"])
             parts.append(L["ml_class_header"].format(cls=current_class))
             parts.append("| :--- | ---: | :--- |")
+            ladder = ml_pred.get("ladder_adjusted") or []
             for cls in ("Eco", "Deluxe", "SkyBoss", "GDS"):
                 if cls in ml_pred:
                     label = "GDS (Business)" if cls == "GDS" else cls
-                    parts.append(f"| **{label}** | {ml_pred.get(cls, 0):,.0f} | {_delta_for(cls, ml_pred.get(cls, 0))} |")
+                    parts.append(f"| **{label}** | {ml_pred.get(cls, 0):,.0f}{'†' if cls in ladder else ''} | {_delta_for(cls, ml_pred.get(cls, 0))} |")
             if _class_order_warning(ml_pred):
                 parts.append(L["note_inversion_single"])
+            if ladder:
+                parts.append(L["note_ladder"])
 
     # Executive Summary (always show if available)
     if report.get("executive_summary"):

@@ -496,4 +496,20 @@ def _predict_classes_for_flight(row, model, app_state) -> dict:
             ref_val = price if price > 0 else 1000000.0
             predictions[ui_name] = round(ref_val * ratios[ui_name], -3)
 
+    # Enforce the fare-class ladder (Eco < Deluxe < SkyBoss). Each class is
+    # predicted independently by swapping the fare_family feature, and the
+    # model's signal for rare premium classes is weak — SkyBoss came out below
+    # Deluxe on ~half the flights. Only true inversions are corrected (raised
+    # to a 5% minimum premium over the class below); "ladder_adjusted" lists
+    # the corrected classes so reports can disclose the calibration.
+    LADDER_MIN_STEP = 1.05
+    ladder_adjusted = []
+    if predictions.get("Deluxe") and predictions.get("Eco") and predictions["Deluxe"] < predictions["Eco"]:
+        predictions["Deluxe"] = round(predictions["Eco"] * LADDER_MIN_STEP, -3)
+        ladder_adjusted.append("Deluxe")
+    if predictions.get("SkyBoss") and predictions.get("Deluxe") and predictions["SkyBoss"] < predictions["Deluxe"]:
+        predictions["SkyBoss"] = round(predictions["Deluxe"] * LADDER_MIN_STEP, -3)
+        ladder_adjusted.append("SkyBoss")
+    predictions["ladder_adjusted"] = ladder_adjusted
+
     return predictions
