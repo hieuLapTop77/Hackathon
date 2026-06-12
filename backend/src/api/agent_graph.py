@@ -1713,7 +1713,16 @@ async def generate_report(state: AgentState) -> dict:
 - Đề xuất: {opt['recommendation']}""")
 
         if comp:
-            sections.append(f"THÔNG TIN GIÁ ĐỐI THỦ:\n{json.dumps(comp[:10], ensure_ascii=False, indent=2)}")
+            # Human-readable lines — raw json.dumps here got copied verbatim
+            # into the report (price 1495240.0, status Higher, ...)
+            status_labels = {"Lower": "thấp hơn VJ", "Higher": "cao hơn VJ", "Similar": "tương đương VJ"}
+            comp_text = "\n".join(
+                f"  * {c.get('competitor', 'N/A')}: {float(c.get('price') or 0):,.0f} VND"
+                f" (chặng {c.get('route', 'N/A')}, hạng {c.get('fare_class') or 'Eco'},"
+                f" {status_labels.get(c.get('status'), c.get('status') or 'N/A')})"
+                for c in comp[:10]
+            )
+            sections.append(f"THÔNG TIN GIÁ ĐỐI THỦ:\n{comp_text}")
 
         if price_comp and price_comp.get("results"):
             comp_lines = []
@@ -1773,14 +1782,20 @@ async def generate_report(state: AgentState) -> dict:
                 report = _validate_summary(report, data_context, flight, ml_pred, adjusted_pred, state)
                 message = _format_report_markdown(report, flight, ml_pred, price_comp, adjusted_pred, state)
             except json.JSONDecodeError:
-                logger.warning("JSON parse failed, using raw LLM output")
-                message = content
+                # Usually truncated output (reasoning model ran out of tokens
+                # mid-JSON) — never show raw JSON; build the deterministic
+                # report from the same data the tables use
+                logger.warning("JSON parse failed (likely truncated output), using deterministic report")
+                lang = detect_lang(state.get("user_query", ""))
+                L = _L10N.get(lang, _L10N["vi"])
+                facts = _summary_facts(flight, ml_pred, adjusted_pred, state)
                 report = {
-                    "executive_summary": content,
+                    "executive_summary": (L["truncated_summary_prefix"] + (" " + facts if facts else "")).strip(),
                     "recommended_price": opt["optimal_price"] if opt else (flight.get("avg_price") if flight.get("is_aggregate") else flight.get("price", 0)),
-                    "confidence_level": "medium",
+                    "confidence_level": "low",
                     "risk_factors": []
                 }
+                message = _format_report_markdown(report, flight, ml_pred, price_comp, adjusted_pred, state)
         else:
             message = content
             report = None
@@ -2239,6 +2254,7 @@ _L10N = {
         "auto_summary_single": "Theo dữ liệu: giá hiện tại {price:,.0f} VND; giá Eco mô hình đưa ra {eco:,.0f} VND ({delta}).",
         "auto_summary_single_nopred": "Theo dữ liệu: giá hiện tại {price:,.0f} VND.",
         "system_facts_label": "**Đối chiếu hệ thống:**",
+        "truncated_summary_prefix": "(Phân tích AI không hoàn chỉnh do giới hạn độ dài trả lời — dưới đây là số liệu hệ thống tổng hợp từ dữ liệu.)",
         "summary_agg": "\n**Tóm tắt phân tích:** {s}",
         "flight_report_title": "### Báo cáo Phân tích Chuyến bay Vietjet {no}",
         "adj_class_title": "\n#### Đề xuất giá vé theo hạng (đã điều chỉnh cạnh tranh)",
@@ -2294,6 +2310,7 @@ _L10N = {
         "auto_summary_single": "Per the data: current price {price:,.0f} VND; the model's Eco price is {eco:,.0f} VND ({delta}).",
         "auto_summary_single_nopred": "Per the data: current price {price:,.0f} VND.",
         "system_facts_label": "**System cross-check:**",
+        "truncated_summary_prefix": "(The AI analysis was incomplete due to the response length limit — below is a system summary computed from the data.)",
         "summary_agg": "\n**Analysis summary:** {s}",
         "flight_report_title": "### Vietjet Flight Analysis Report {no}",
         "adj_class_title": "\n#### Recommended fares by class (competition-adjusted)",
