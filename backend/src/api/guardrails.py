@@ -21,6 +21,17 @@ LF_MAX = 1.0
 MAX_QUERY_LENGTH = 2000
 
 
+# Vietnamese diacritics / common ASCII-Vietnamese words — mirrors detect_lang
+# in agent_graph.py (not imported to avoid a circular import)
+_VI_CHARS_RE = re.compile(r"[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]")
+_VI_ASCII_HINTS_RE = re.compile(r"\b(khong|duoc|chuyen|gia ve|nau an|the nao|bao nhieu|hom nay|ngay mai)\b")
+
+
+def _is_vietnamese(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(_VI_CHARS_RE.search(t)) or bool(_VI_ASCII_HINTS_RE.search(t))
+
+
 @dataclass
 class GuardrailResult:
     """Kết quả kiểm tra của hệ thống Guardrails."""
@@ -160,17 +171,20 @@ class GuardrailsPipeline:
                 return {"blocked": True, "reason": "Câu hỏi nằm ngoài phạm vi hệ thống tối ưu doanh thu."}
 
         if not any(p.search(query) for p in self._compiled_in_scope):
-            return {
-                "blocked": True,
-                "reason": (
+            # Reply in the user's language instead of a bilingual "A / B" blob
+            if _is_vietnamese(query):
+                reason = (
                     "Câu hỏi nằm ngoài phạm vi nghiệp vụ kiểm soát giá vé. "
                     "Vui lòng hỏi về giá vé, chuyến bay, dự báo giá, đối thủ cạnh tranh "
-                    "hoặc tối ưu doanh thu (ví dụ: 'giá chuyến bay DAD-SGN hôm nay'). / "
+                    "hoặc tối ưu doanh thu (ví dụ: 'giá chuyến bay DAD-SGN hôm nay')."
+                )
+            else:
+                reason = (
                     "This question is outside the fare-control scope. Please ask about "
                     "fares, flights, price forecasts, competitors, or revenue optimization "
                     "(e.g. 'DAD-SGN fares today')."
-                ),
-            }
+                )
+            return {"blocked": True, "reason": reason}
 
         return {"blocked": False}
 

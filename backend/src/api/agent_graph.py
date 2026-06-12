@@ -62,6 +62,30 @@ def detect_lang(text: str) -> str:
     words = set(re.findall(r"[a-z]+", t))
     return "en" if len(words & set(_EN_HINTS)) >= 2 else "vi"
 
+# Nemotron occasionally leaks CJK tokens into Vietnamese answers
+# (e.g. "dự báo chặng bay受影响") — strip them from user-facing text
+_CJK_RE = re.compile(
+    "[⺀-⿿"      # CJK radicals, Kangxi
+    "　-ヿ"      # CJK symbols/punctuation, Hiragana, Katakana
+    "㄰-㆏"      # Hangul compatibility Jamo
+    "㐀-䶿"      # CJK ext A
+    "一-鿿"      # CJK unified ideographs
+    "가-힯"      # Hangul syllables
+    "豈-﫿"      # CJK compatibility ideographs
+    "･-ﾟ]+"    # halfwidth Katakana
+)
+
+
+def strip_cjk(text: str | None) -> str | None:
+    """Remove leaked CJK characters and collapse leftover double spaces."""
+    if not text:
+        return text
+    cleaned = _CJK_RE.sub("", text)
+    if cleaned != text:
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned
+
+
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
@@ -287,6 +311,7 @@ class AgentState(TypedDict):
     target_date: str | None
     parsed_route: str | None
     comparison_intent: bool
+    explanation_intent: bool
 
 
 # ── Langfuse Tracing Helper ──────────────────────────────────────────────────
@@ -433,6 +458,16 @@ class TraceContextProxy:
 _current_trace = TraceContextProxy()
 
 
+# Whitelist of airport IATA codes served by Vietjet — the bare \b[A-Z]{3}\b
+# fallback in parse_query used to turn ordinary words into routes ("CAO hơn"
+# + "ngày MAI" → chặng ảo "CAO-MAI" → aggregate query rỗng → KeyError 'route')
+VALID_IATA_CODES = {
+    "SGN", "HAN", "DAD", "CXR", "PQC", "HPH", "VII", "HUI", "UIH", "VCA",
+    "DLI", "BMV", "PXU", "VDH", "THD", "VCL", "TBB", "VKG", "CAH", "VCS",
+    "DIN", "SQH", "VDO",
+}
+
+
 def extract_route(query: str) -> str | None:
     """Extract route from natural language query using Vietnamese city names or IATA codes."""
     if not query:
@@ -514,11 +549,11 @@ def parse_query(state: AgentState) -> dict:
     normalized_query = re.sub(r'\b(?:ĐẾN|TO|ĐI|->|=>|AND|VÀ)\b', '-', normalized_query)
     normalized_query = re.sub(r'\s*-\s*', '-', normalized_query)
     route_match = re.search(r'\b([A-Z]{3})-([A-Z]{3})\b', normalized_query)
-    
-    if route_match:
+
+    if route_match and route_match.group(1) in VALID_IATA_CODES and route_match.group(2) in VALID_IATA_CODES:
         parsed_route = route_match.group(0)
     else:
-        iata_codes = re.findall(r'\b[A-Z]{3}\b', query_upper)
+        iata_codes = [c for c in re.findall(r'\b[A-Z]{3}\b', query_upper) if c in VALID_IATA_CODES]
         if len(iata_codes) == 2:
             parsed_route = f"{iata_codes[0]}-{iata_codes[1]}"
 
@@ -578,6 +613,11 @@ def parse_query(state: AgentState) -> dict:
     comparison_keywords = ["so sánh", "đối thủ", "hãng khác", "bamboo", "vietnam airlines", "vietravel", "pacific", "compare", "competitor"]
     comparison_intent = any(kw in query_lower for kw in comparison_keywords)
 
+    # 4a. Explanation intent ("tại sao đề xuất tăng 155%?") — the answer should
+    # be a textual explanation of the existing numbers, not another data dump
+    explanation_keywords = ["tại sao", "tai sao", "vì sao", "vi sao", "lý do", "ly do", "giải thích", "giai thich", "why", "explain"]
+    explanation_intent = any(kw in query_lower for kw in explanation_keywords)
+
     # 4b. Multi-turn fallback: fill missing slots from session context seeded
     # into the initial state (e.g. follow-up "còn ngày mốt thì sao?" inherits
     # the route from the previous turn but keeps its own freshly-parsed date)
@@ -628,7 +668,8 @@ def parse_query(state: AgentState) -> dict:
         "iteration_count": 0,
         "target_date": target_date,
         "parsed_route": parsed_route,
-        "comparison_intent": comparison_intent
+        "comparison_intent": comparison_intent,
+        "explanation_intent": explanation_intent
     }
 
 
@@ -706,26 +747,37 @@ def query_database(state: AgentState) -> dict:
                         fd["flight_no"] = f_no
                         flights_list.append(fd)
 
-                data = {
-                    "is_aggregate": True,
-                    "target_date": target_date,
-                    "parsed_route": parsed_route,
-                    "total_flights": total_flights,
-                    "avg_price": avg_price,
-                    "avg_lf": avg_lf,
-                    "flights_list": flights_list
-                }
-
-                if flights_list:
+                if not flights_list:
+                    # No flights on this route/date — report "not found" instead
+                    # of an empty aggregate dict that downstream nodes (price
+                    # comparison, report tables) cannot work with
+                    data = None
+                    tools_called.append({
+                        "name": "Query SQL Server (Aggregate DB)",
+                        "args": f"Route: '{parsed_route}', Date: '{target_date}'",
+                        "result": f"Không tìm thấy chuyến bay nào chặng {parsed_route} ngày {target_date}."
+                    })
+                else:
+                    data = {
+                        "is_aggregate": True,
+                        "target_date": target_date,
+                        "parsed_route": parsed_route,
+                        "route": parsed_route,
+                        "total_flights": total_flights,
+                        "avg_price": avg_price,
+                        "avg_lf": avg_lf,
+                        "flights_list": flights_list
+                    }
                     data.update(flights_list[0])
+                    data["route"] = parsed_route
                     data["price"] = avg_price
                     data["lf"] = avg_lf
 
-                tools_called.append({
-                    "name": "Query SQL Server (Aggregate DB)",
-                    "args": f"Route: '{parsed_route}', Date: '{target_date}'",
-                    "result": f"Tìm thấy {total_flights} chuyến bay chặng {parsed_route} ngày {target_date}. Giá TB: {avg_price:,.0f} VND, LF trung bình: {avg_lf*100:.1f}%"
-                })
+                    tools_called.append({
+                        "name": "Query SQL Server (Aggregate DB)",
+                        "args": f"Route: '{parsed_route}', Date: '{target_date}'",
+                        "result": f"Tìm thấy {total_flights} chuyến bay chặng {parsed_route} ngày {target_date}. Giá TB: {avg_price:,.0f} VND, LF trung bình: {avg_lf*100:.1f}%"
+                    })
 
             # Case 2: Only Date query (e.g. all flights today)
             elif target_date and not parsed_route and search_term == target_date:
@@ -1024,7 +1076,7 @@ def run_ml_prediction(state: AgentState) -> dict:
         tools_called.append({
             "name": f"ML Model Price Prediction ({model_name})",
             "args": f"flight_no={flight['flight_no']}, route={flight['route']}, price={flight['price']}, competitor_price={avg_comp_price}",
-            "result": ", ".join([f"{cls}: {val:,.0f} VND" for cls, val in predictions.items()])
+            "result": ", ".join([f"{cls}: {val:,.0f} VND" for cls, val in predictions.items() if isinstance(val, (int, float))])
         })
 
         if _current_trace:
@@ -1285,9 +1337,9 @@ def check_competitors(state: AgentState) -> dict:
                 if route_info:
                     base_price = route_info["avg_price"]
                 else:
-                    base_price = flight.get("avg_price", 1500000.0)
+                    base_price = flight.get("avg_price") or 1500000.0
             else:
-                base_price = flight["price"]
+                base_price = flight.get("price") or base_price
                 
         comp_data = comp_svc.get_prices(
             route=r,
@@ -1394,8 +1446,17 @@ def run_price_comparison(state: AgentState) -> dict:
                     })
     # 2. Process single flight or route
     else:
-        r = flight["route"]
-        vj_price = flight["price"]
+        r = flight.get("route") or flight.get("parsed_route")
+        vj_price = flight.get("price") or 0
+        if not r or vj_price <= 0:
+            tools_called.append({
+                "name": "Price Comparison Agent",
+                "args": "None",
+                "result": "Bỏ qua so sánh: Dữ liệu Vietjet thiếu chặng bay hoặc giá hợp lệ."
+            })
+            if _current_trace:
+                _current_trace.end_span("run_price_comparison", {"success": False})
+            return {"tools_called": tools_called}
         comps = competitor_data
         for c in comps:
             if c["route"] == r:
@@ -1748,6 +1809,14 @@ async def generate_report(state: AgentState) -> dict:
 
         data_context = "\n\n".join(sections)
 
+        if state.get("explanation_intent"):
+            data_context += (
+                "\n\nYÊU CẦU ĐẶC BIỆT: Người dùng đang hỏi GIẢI THÍCH LÝ DO. "
+                "Hãy trả lời trực tiếp câu hỏi 'tại sao' bằng văn xuôi trong executive_summary: "
+                "nêu các yếu tố cụ thể từ dữ liệu trên (giá hiện tại cao/thấp bất thường, tỷ lệ lấp đầy, "
+                "giá đối thủ, sự kiện thị trường, sai số mô hình). KHÔNG liệt kê lại bảng số liệu."
+            )
+
         prompt = load_agent_prompt(
             "report_agent_success.md",
             user_query=state['user_query'],
@@ -1824,7 +1893,8 @@ async def generate_report(state: AgentState) -> dict:
                 "executive_summary": "Báo cáo dự phòng - vLLM offline",
                 "recommended_price": opt["optimal_price"] if opt else (flight.get("avg_price") if flight.get("is_aggregate") else flight.get("price", 0)),
                 "confidence_level": "low",
-                "risk_factors": ["vLLM service unavailable"]
+                "risk_factors": ["vLLM service unavailable"],
+                "degraded": True
             }
         else:
             detail = state.get('error') or str(ex) or 'Lỗi hệ thống hoặc vLLM offline.'
@@ -1834,6 +1904,10 @@ async def generate_report(state: AgentState) -> dict:
 
     if _current_trace:
         _current_trace.end_span("generate_report", {"has_structured_output": report is not None})
+
+    message = strip_cjk(message)
+    if report and isinstance(report.get("executive_summary"), str):
+        report["executive_summary"] = strip_cjk(report["executive_summary"])
 
     return {"thinking": thinking, "report": report, "message": message}
 
@@ -2071,6 +2145,13 @@ async def run_supervisor_node(state: AgentState) -> dict:
     elif search_term and not any("Query SQL Server" in t for t in tools_called):
         next_agent_override = "DatabaseAgent"
         reasoning_override = "Cần truy vấn dữ liệu chuyến bay trước từ cơ sở dữ liệu."
+
+    # Rule 1b: Explanation question ("tại sao đề xuất tăng 155%?") — once the
+    # parallel data agents have run, answer with a textual explanation instead
+    # of looping into comparison/adjustment table builders
+    elif state.get("explanation_intent"):
+        next_agent_override = "generate_report"
+        reasoning_override = "Người dùng hỏi giải thích lý do — tổng hợp câu trả lời diễn giải từ dữ liệu đã có."
 
     # Rule 2: Handle Comparison Intent Workflow
     elif is_comparison:
@@ -2523,9 +2604,14 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
     has_comp_intent = any(kw in query_lower for kw in ["đối thủ", "so sánh", "hãng khác", "bamboo", "vietnam airlines", "compare", "competitor"]) or (state and state.get("comparison_intent"))
     has_opt_intent = any(kw in query_lower for kw in ["tối ưu", "optimize", "doanh thu", "scipy"])
     has_ml_intent = any(kw in query_lower for kw in ["dự báo", "dự đoán", "predict", "forecast"])
-    
-    # If no specific intent is detected, show everything as fallback
-    show_all = not (has_comp_intent or has_opt_intent or has_ml_intent)
+
+    # Explanation question → textual answer only, suppress all data tables
+    if state and state.get("explanation_intent"):
+        has_comp_intent = has_opt_intent = has_ml_intent = False
+        show_all = False
+    else:
+        # If no specific intent is detected, show everything as fallback
+        show_all = not (has_comp_intent or has_opt_intent or has_ml_intent)
 
     if flight.get("is_aggregate") == True:
         target_date = flight.get("target_date", "2026-06-08")
@@ -2922,7 +3008,8 @@ async def run_copilot_graph_stream(user_query: str, session_id=None):
         "next_agent": "",
         "target_date": None,
         "parsed_route": None,
-        "comparison_intent": False
+        "comparison_intent": False,
+        "explanation_intent": False
     }
     initial_state.update(seed_state)
 

@@ -41,10 +41,15 @@ export function CopilotPage() {
 
   // Poll status endpoint to check vLLM connection status
   useEffect(() => {
-    fetch(`${API}/agent/status`)
-      .then(res => res.json())
-      .then(data => setStatusData(data))
-      .catch(() => setStatusData({ vllm_connected: false, vllm_model: "offline" }));
+    const fetchStatus = () => {
+      fetch(`${API}/agent/status`)
+        .then(res => res.json())
+        .then(data => setStatusData(prev => ({ ...data, degraded: prev?.degraded || false })))
+        .catch(() => setStatusData({ vllm_connected: false, vllm_model: "offline" }));
+    };
+    fetchStatus();
+    const timer = setInterval(fetchStatus, 30000);
+    return () => clearInterval(timer);
   }, []);
 
   // Fetch all chat sessions on mount
@@ -159,6 +164,9 @@ export function CopilotPage() {
         tools: data.tools_called || [],
         action: data.action || null
       }]);
+      // Reflect AI health honestly: amber badge when the last answer was a
+      // non-LLM fallback report even though vLLM /models still responds
+      setStatusData(prev => ({ ...prev, degraded: !!(data.report && data.report.degraded) }));
       // If it was a new chat, update session state and reload list
       if (!currentSessionId) {
         setCurrentSessionId(data.session_id);
@@ -200,7 +208,9 @@ export function CopilotPage() {
             gotResult = true;
             applyResult(payload.data);
           } else if (payload.type === "error") {
-            throw new Error(payload.message || "Agent error");
+            const e = new Error(payload.message || "Agent error");
+            e.fromStream = true;
+            throw e;
           }
         }
       }
@@ -226,7 +236,9 @@ export function CopilotPage() {
       } else {
         setMessages(prev => [...prev, {
           role: "assistant",
-          text: "Đã xảy ra lỗi khi xử lý yêu cầu. Vui lòng kiểm tra kết nối với server backend và cụm vLLM.",
+          text: err.fromStream && err.message
+            ? `Đã xảy ra lỗi khi xử lý yêu cầu (chi tiết kỹ thuật: ${err.message}). Vui lòng thử lại hoặc diễn đạt lại câu hỏi.`
+            : "Đã xảy ra lỗi khi xử lý yêu cầu. Vui lòng kiểm tra kết nối với server backend và cụm vLLM.",
           tools: []
         }]);
       }
@@ -492,21 +504,21 @@ export function CopilotPage() {
                 alignItems: "center",
                 gap: 6,
                 background: statusData.vllm_connected ? "var(--color-background-success)" : "var(--color-background-danger)",
-                border: `1px solid ${statusData.vllm_connected ? "var(--color-border-success)" : "var(--color-border-danger)"}`,
+                border: `1px solid ${!statusData.vllm_connected ? "var(--color-border-danger)" : statusData.degraded ? "#d97706" : "var(--color-border-success)"}`,
                 padding: "4px 10px",
                 borderRadius: 20,
                 fontSize: 10,
                 fontWeight: 700,
-                color: statusData.vllm_connected ? "var(--color-text-success)" : "var(--color-text-danger)"
+                color: !statusData.vllm_connected ? "var(--color-text-danger)" : statusData.degraded ? "#b45309" : "var(--color-text-success)"
               }}>
                 <span style={{
                   width: 5,
                   height: 5,
                   borderRadius: "50%",
-                  backgroundColor: statusData.vllm_connected ? "#059669" : "#be123c",
+                  backgroundColor: !statusData.vllm_connected ? "#be123c" : statusData.degraded ? "#d97706" : "#059669",
                   display: "inline-block"
                 }} />
-                <span>vLLM: {statusData.vllm_connected ? "Connected" : "Offline"}</span>
+                <span>vLLM: {!statusData.vllm_connected ? "Offline" : statusData.degraded ? "Fallback" : "Connected"}</span>
               </div>
             </div>
 
@@ -689,21 +701,23 @@ export function CopilotPage() {
                   alignItems: "center",
                   gap: 6,
                   background: statusData.vllm_connected ? "var(--color-background-success)" : "var(--color-background-danger)",
-                  border: `1px solid ${statusData.vllm_connected ? "var(--color-border-success)" : "var(--color-border-danger)"}`,
+                  border: `1px solid ${!statusData.vllm_connected ? "var(--color-border-danger)" : statusData.degraded ? "#d97706" : "var(--color-border-success)"}`,
                   padding: isMobile ? "5px 9px" : "6px 12px",
                   borderRadius: 20,
                   fontSize: isMobile ? 10 : 12,
                   fontWeight: 700,
-                  color: statusData.vllm_connected ? "var(--color-text-success)" : "var(--color-text-danger)"
+                  color: !statusData.vllm_connected ? "var(--color-text-danger)" : statusData.degraded ? "#b45309" : "var(--color-text-success)"
                 }}>
                   <span style={{
                     width: 8,
                     height: 8,
                     borderRadius: "50%",
-                    backgroundColor: statusData.vllm_connected ? "#059669" : "#be123c",
+                    backgroundColor: !statusData.vllm_connected ? "#be123c" : statusData.degraded ? "#d97706" : "#059669",
                     display: "inline-block"
                   }} />
-                  <span>{isMobile ? (statusData.vllm_connected ? "Online" : "Offline") : `vLLM: ${statusData.vllm_connected ? "Connected" : "Offline"}`}</span>
+                  <span>{isMobile
+                    ? (!statusData.vllm_connected ? "Offline" : statusData.degraded ? "Fallback" : "Online")
+                    : `vLLM: ${!statusData.vllm_connected ? "Offline" : statusData.degraded ? "Fallback" : "Connected"}`}</span>
                 </div>
 
                 {!isMobile && (
