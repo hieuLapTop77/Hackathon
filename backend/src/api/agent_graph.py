@@ -2233,7 +2233,6 @@ _L10N = {
         "note_delta": "\n*Cột chênh lệch so sánh giá thực tế hiện tại với giá mô hình đưa ra — không phải biến động giá thị trường.*",
         "note_anomaly": "*N/A / ⚠ ở cột giá hiện tại: chưa có dữ liệu booking hoặc giá thấp bất thường (< {floor:,.0f} VND) — đã loại khỏi giá trung bình và cột chênh lệch.*",
         "note_inversion": "*⚠ ở cuối dòng: hạng vé cao có giá dự báo thấp hơn hạng dưới (SkyBoss < Deluxe hoặc Deluxe < Eco) — cần kiểm tra lại dữ liệu đầu vào hoặc mô hình.*",
-        "note_ladder": "*† Giá gốc mô hình dự báo thấp hơn hạng dưới, đã được nâng lên bậc tối thiểu (+5% so với hạng dưới) — cần kiểm tra lại mô hình dự báo hạng cao.*",
         "auto_summary_prefix": "(Tóm tắt AI đã bị loại vì chứa số liệu không khớp dữ liệu — dưới đây là tóm tắt tự động từ dữ liệu.)",
         "auto_summary_agg": "Theo dữ liệu: chênh lệch giữa giá hiện tại và giá Eco mô hình đưa ra từ {minpct:+.1f}% đến {maxpct:+.1f}% trên {m}/{n} chuyến có dữ liệu hợp lệ; giá vé trung bình thực tế {avg:,.0f} VND, tỷ lệ lấp đầy trung bình {lf:.1f}%.",
         "auto_summary_issues": "Lưu ý: {k} chuyến có cảnh báo dữ liệu (thiếu giá hoặc thang hạng vé bất thường).",
@@ -2289,7 +2288,6 @@ _L10N = {
         "note_delta": "\n*The gap column compares the current actual price with the model's price — it is not market price movement.*",
         "note_anomaly": "*N/A / ⚠ in the current-price column: missing booking data or abnormally low price (< {floor:,.0f} VND) — excluded from averages and the gap column.*",
         "note_inversion": "*⚠ at end of row: a higher fare class is priced below a lower one (SkyBoss < Deluxe or Deluxe < Eco) — check the input data or the model.*",
-        "note_ladder": "*† The model's raw forecast was below the lower class and was raised to the minimum ladder step (+5% over the class below) — review the premium-class model.*",
         "auto_summary_prefix": "(The AI summary was discarded because it contained figures not found in the data — below is an automatic data-derived summary.)",
         "auto_summary_agg": "Per the data: the gap between current prices and the model's Eco price ranges from {minpct:+.1f}% to {maxpct:+.1f}% across {m}/{n} flights with valid data; average actual fare {avg:,.0f} VND, average load factor {lf:.1f}%.",
         "auto_summary_issues": "Note: {k} flights carry data warnings (missing price or abnormal fare-class ladder).",
@@ -2566,11 +2564,10 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
                     inversion = _class_order_warning(classes)
                     has_class_inversion = has_class_inversion or inversion
                     ladder = classes.get("ladder_adjusted") or []
-                    has_ladder = has_ladder or bool(ladder)
                     parts.append(
                         f"| **VJ{str(p['flight_no']).replace('VJ', '')}** | {_fmt_price_cell(cur)} | {eco:,.0f} | {_fmt_delta(eco, cur, lang)} "
-                        f"| {classes.get('Deluxe', 0):,.0f}{'†' if 'Deluxe' in ladder else ''} "
-                        f"| {classes.get('SkyBoss', 0):,.0f}{'†' if 'SkyBoss' in ladder else ''}{' ⚠' if inversion else ''} |"
+                        f"| {classes.get('Deluxe', 0):,.0f} "
+                        f"| {classes.get('SkyBoss', 0):,.0f}{' ⚠' if inversion else ''} |"
                     )
                 if len(agg_preds) > 10:
                     parts.append(L["more_flights"].format(n=len(agg_preds) - 10))
@@ -2579,8 +2576,6 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
                     parts.append(L["note_anomaly"].format(floor=PRICE_FLOOR_VND))
                 if has_class_inversion:
                     parts.append(L["note_inversion"])
-                if has_ladder:
-                    parts.append(L["note_ladder"])
 
         if report and report.get("executive_summary"):
             parts.append(L["summary_agg"].format(s=report['executive_summary']))
@@ -2615,15 +2610,12 @@ def _format_report_markdown(report: dict, flight: dict, ml_pred: dict | None = N
             parts.append(L["ml_class_title"])
             parts.append(L["ml_class_header"].format(cls=current_class))
             parts.append("| :--- | ---: | :--- |")
-            ladder = ml_pred.get("ladder_adjusted") or []
             for cls in ("Eco", "Deluxe", "SkyBoss", "GDS"):
                 if cls in ml_pred:
                     label = "GDS (Business)" if cls == "GDS" else cls
-                    parts.append(f"| **{label}** | {ml_pred.get(cls, 0):,.0f}{'†' if cls in ladder else ''} | {_delta_for(cls, ml_pred.get(cls, 0))} |")
+                    parts.append(f"| **{label}** | {ml_pred.get(cls, 0):,.0f} | {_delta_for(cls, ml_pred.get(cls, 0))} |")
             if _class_order_warning(ml_pred):
                 parts.append(L["note_inversion_single"])
-            if ladder:
-                parts.append(L["note_ladder"])
 
     # Executive Summary (always show if available)
     if report.get("executive_summary"):
