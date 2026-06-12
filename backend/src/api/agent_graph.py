@@ -1307,6 +1307,18 @@ def check_competitors(state: AgentState) -> dict:
                 "flight_date": p.flight_date,
             })
 
+    # Drop exact duplicates — per-flight lookups return the same route-level
+    # competitor record once per VJ flight, flooding the summary and the LLM
+    # context with identical entries
+    seen_entries = set()
+    deduped = []
+    for p in all_competitor_data:
+        key = (p["competitor"], p["route"], round(p["price"]), p.get("fare_class"), p.get("flight_date"))
+        if key not in seen_entries:
+            seen_entries.add(key)
+            deduped.append(p)
+    all_competitor_data = deduped
+
     summary_parts = []
     for r in routes_to_check:
         route_prices = [p for p in all_competitor_data if p["route"] == r]
@@ -1621,13 +1633,23 @@ async def generate_report(state: AgentState) -> dict:
     data_context = ""
 
     if state.get("error") or not flight:
-        error_msg = state.get('error') or 'Không tìm thấy dữ liệu chuyến bay phù hợp trong cơ sở dữ liệu.'
-        prompt = load_agent_prompt(
-            "report_agent_error.md",
-            user_query=state['user_query'],
-            error_status=error_msg,
-            response_language=response_language
-        )
+        if rag and not state.get("error"):
+            # Market-context question answered straight from RAG — no flight
+            # data involved, the pricing-report prompt does not apply
+            prompt = load_agent_prompt(
+                "market_context_agent.md",
+                user_query=state['user_query'],
+                rag_context=rag,
+                response_language=response_language
+            )
+        else:
+            error_msg = state.get('error') or 'Không tìm thấy dữ liệu chuyến bay phù hợp trong cơ sở dữ liệu.'
+            prompt = load_agent_prompt(
+                "report_agent_error.md",
+                user_query=state['user_query'],
+                error_status=error_msg,
+                response_language=response_language
+            )
     else:
         # Build context sections based on available data (support aggregate)
         if flight.get("is_aggregate") == True:
@@ -1737,6 +1759,11 @@ async def generate_report(state: AgentState) -> dict:
             max_tokens=3072
         )
         latency_ms = int((time.time() - start_time) * 1000)
+
+        if not (content or "").strip():
+            # Reasoning models can burn the whole token budget thinking and
+            # return empty content — never surface an empty answer
+            raise ValueError("LLM returned empty content (token budget likely consumed by reasoning)")
 
         thinking = reasoning if reasoning else "Agent đã hoàn thành phân tích dữ liệu."
 
@@ -2005,8 +2032,28 @@ async def run_supervisor_node(state: AgentState) -> dict:
     next_agent_override = None
     reasoning_override = ""
 
+    # Rule 0: Market-context question (festival/event/weather/news) with no
+    # pricing intent → answer from RAG directly; the full pricing pipeline
+    # (DB/ML/competitor) is irrelevant noise for these
+    is_context_question = any(kw in user_query_lower for kw in [
+        "lễ hội", "le hoi", "festival", "sự kiện", "su kien", "event",
+        "thời tiết", "thoi tiet", "weather", "tin tức", "tin tuc", "bối cảnh", "boi canh"
+    ])
+    has_pricing_intent = any(kw in user_query_lower for kw in [
+        "giá", "gia ve", " vé", "fare", "price", "dự báo", "du bao", "forecast", "predict",
+        "doanh thu", "revenue", "tối ưu", "toi uu", "optimize", "so sánh", "so sanh", "compare",
+        "đối thủ", "doi thu", "competitor", "load factor", "lấp đầy", "lap day"
+    ])
+    if is_context_question and not has_pricing_intent:
+        if not rag_context and "Qdrant RAG Market Intelligence" not in tools_called:
+            next_agent_override = "RAGAgent"
+            reasoning_override = "Câu hỏi về bối cảnh thị trường (sự kiện/thời tiết) — truy vấn RAG để trả lời trực tiếp."
+        else:
+            next_agent_override = "generate_report"
+            reasoning_override = "Đã có bối cảnh thị trường từ RAG, trả lời trực tiếp câu hỏi."
+
     # Rule 1: Always query database if a target is parsed but database query has not run
-    if search_term and not any("Query SQL Server" in t for t in tools_called):
+    elif search_term and not any("Query SQL Server" in t for t in tools_called):
         next_agent_override = "DatabaseAgent"
         reasoning_override = "Cần truy vấn dữ liệu chuyến bay trước từ cơ sở dữ liệu."
 
